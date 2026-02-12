@@ -1,75 +1,102 @@
-# CLAUDE.md - Project Instructions for AI Assistants
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-This is a Security Operations Center (SOC) dashboard for healthcare environments. The frontend is a Next.js application with a dark-themed UI optimized for security monitoring.
+SOC (Security Operations Center) dashboard for healthcare environments. Next.js 16 frontend with ArcSight ESM integration for real-time connector/customer monitoring. Dark-themed UI optimized for security operations.
 
-## Quick Start
+## Commands
 
 ```bash
 cd frontend
-npm install
-npm run dev
+npm install          # Install dependencies
+npm run dev          # Dev server at http://localhost:3000
+npm run build        # Production build (catches TypeScript errors)
+npm run lint         # ESLint
 ```
 
-The app runs at http://localhost:3000
+No test framework is configured yet.
 
-## Key Files
+## Environment Setup
 
-| File | Purpose |
-|------|---------|
-| `frontend/src/app/dashboard/page.tsx` | Main dashboard page with all components |
-| `frontend/src/app/globals.css` | Global styles and CSS variables |
-| `frontend/src/app/page.tsx` | Authentication/login page |
-| `frontend/src/components/ui/` | shadcn/ui component library |
+Copy `frontend/.env.example` to `frontend/.env.local` and fill in ArcSight credentials:
 
-## Architecture Decisions
+| Variable | Purpose |
+|----------|---------|
+| `ARCSIGHT_API_BASE_URL` | ESM DETECT API base (e.g. `https://host:port/detect-api/rest`) |
+| `ARCSIGHT_LOGIN_URL` | Login endpoint for auto-authentication |
+| `ARCSIGHT_USERNAME` / `ARCSIGHT_PASSWORD` | Auto-login credentials |
+| `ARCSIGHT_API_TOKEN` | Optional static token (skips auto-login when set) |
 
-### Layout Structure
-- **Container**: `h-screen overflow-hidden` - constrains to viewport, prevents page scroll
-- **Sidebar**: Fixed width (`w-64` expanded, `w-16` collapsed), full height
-- **Header**: `h-16 flex-shrink-0` - fixed height, won't compress
-- **Main Content**: `flex-1 overflow-auto` - fills remaining space, scrolls internally
+## Architecture
 
-### Styling Conventions
-- Dark theme base: `bg-[#0a0a0f]` (near-black), `bg-[#12121a]` (elevated surfaces)
-- Accent color: `red-600` for primary actions and active states
-- Borders: `border-white/10` for subtle dividers
-- Text: `text-white` for primary, `text-gray-400`/`text-gray-500` for secondary
+### Three-Layer Data Flow
 
-### Component Patterns
-- Cards use `bg-[#12121a] border-white/10`
-- Badges use severity-based colors (critical=red, high=orange, medium=yellow, low=blue)
-- Buttons follow shadcn/ui patterns with custom dark theme overrides
-
-## Common Tasks
-
-### Adding a new nav item
-Edit `navItems` array in `dashboard/page.tsx`:
-```tsx
-const navItems = [
-  { icon: IconComponent, label: "Label", badge: optionalCount },
-  // ...
-];
+```
+ArcSight ESM API ←→ Server-side client ←→ Next.js API routes ←→ React hooks ←→ UI
 ```
 
-### Adding a new stat card
-Copy existing Card pattern in the stats grid section, update icon, title, and values.
+1. **`src/lib/arcsight-client.ts`** — Server-only ArcSight client. Uses `"server-only"` import guard, undici `Agent` with TLS skip, connection pool (6 connections), AbortController timeouts (15s default, 45s for `/connectors/devices`). Handles token management with auto-login and 401 retry.
 
-### Modifying the color scheme
-Update CSS variables in `globals.css` under `:root` and `.dark` selectors.
+2. **`src/app/api/arcsight/`** — Next.js Route Handlers that proxy to the server-side client. All responses set `Cache-Control: no-store`. Thin wrappers with try/catch → JSON error responses.
 
-## Testing Changes
+3. **`src/hooks/use-arcsight.ts`** — Client-side React hooks wrapping `fetch()` to the API routes. Generic `useArcsightQuery<T>` with auto-polling support. Only shows loading spinner on initial fetch, not on polls.
 
-After making UI changes:
-1. Check the browser at http://localhost:3000/dashboard
-2. Verify sticky layout by scrolling main content
-3. Test sidebar collapse functionality
-4. Check responsive behavior at different viewport sizes
+### Customer → Connector Resolution (critical path)
 
-## Code Style
+ArcSight has no direct "connectors for customer" API. The code bridges via a 4-step group hierarchy traversal in `getConnectorsForCustomer()`:
 
-- Use TypeScript for all new code
-- Follow existing Tailwind class ordering (layout → spacing → colors → effects)
-- Keep components in the dashboard page unless they need reuse
-- Use Lucide icons for consistency
+1. `customers/{id}/allPathsToRoot` → get parent group IDs
+2. `groups/{groupId}/children` → get child resource IDs (mixed types)
+3. `connectors/ids?ids=...` → fetch as connectors (non-connectors silently ignored)
+4. `connectors/devices` → global device map, slowest call (45s timeout)
+
+Steps 3 and 4 run in parallel via `Promise.all`. A debug endpoint at `/api/arcsight/customers/[id]/debug` runs each step individually with timing data.
+
+### Dashboard Layout
+
+- **`src/app/dashboard/layout.tsx`** — Shared layout with sidebar + header. Client component with collapsible sidebar (`w-64`/`w-16`), path-based active nav highlighting.
+- **`src/app/dashboard/page.tsx`** — Main overview with stats, alerts table, activity feed. Alert data is currently hardcoded.
+- **`src/app/dashboard/customers/page.tsx`** — Customer list with search (300ms debounce), connector health stats.
+- **`src/app/dashboard/customers/[id]/page.tsx`** — Customer detail with connector table, link/unlink connector sheet.
+
+### Routes
+
+| Route | Purpose |
+|-------|---------|
+| `/` | Login page |
+| `/dashboard` | Main SOC overview |
+| `/dashboard/customers` | ArcSight customer list |
+| `/dashboard/customers/[id]` | Customer detail + connectors |
+
+### API Routes
+
+| Endpoint | Methods | Client function |
+|----------|---------|-----------------|
+| `/api/arcsight/customers` | GET | `getAllCustomers()` |
+| `/api/arcsight/customers/[id]` | GET | `getCustomerById()` |
+| `/api/arcsight/customers/[id]/connectors` | GET, POST, DELETE | `getConnectorsForCustomer()`, `link/unlinkConnectorsToCustomer()` |
+| `/api/arcsight/customers/[id]/debug` | GET | Step-by-step diagnostic report |
+| `/api/arcsight/connectors` | GET | `getAllConnectors()` |
+| `/api/arcsight/connectors/health` | GET | `getConnectorHealth()` |
+| `/api/arcsight/connectors/devices` | GET | `getConnectorDevices()` — graceful degradation on failure |
+
+## Styling Conventions
+
+- Dark theme: `bg-[#0a0a0f]` (base), `bg-[#12121a]` (elevated surfaces)
+- Accent: `red-600` for primary actions and active states
+- Borders: `border-white/10`
+- Text: `text-white` primary, `text-gray-400`/`text-gray-500` secondary
+- Cards: `bg-[#12121a] border-white/10`
+- Severity badges: critical=red, high=orange, medium=yellow, low=blue
+- Layout: `h-screen overflow-hidden` container, sidebar + header fixed, main content scrolls internally
+
+## Code Patterns
+
+- shadcn/ui (new-york style) with `@/components/ui/` — add new components via `npx shadcn@latest add <component>`
+- Path alias: `@/*` maps to `./src/*`
+- Lucide icons throughout
+- Tailwind CSS 4 (PostCSS plugin, not `tailwind.config.js`)
+- Batch size of 50 IDs per bulk ArcSight API call
+- React hooks auto-poll: customers at 30s, connector health at 15s
