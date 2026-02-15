@@ -59,3 +59,32 @@ export interface ConnectorHealth {
 export interface LinkConnectorsRequest {
   connectorIds: string[];
 }
+
+// --- Active Channel types (Phoenix GWT-RPC) ---
+
+/** Channel subtype: Base, Group, View, Other */
+export type ChannelSubtype = "B" | "G" | "V" | "O";
+
+/** A single filter condition on a channel */
+export interface ChannelFilterCondition {
+  field: string;
+  displayName: string;
+  operator: string;
+  value: string;
+}
+
+/** ArcSight Active Channel resource */
+export interface Channel extends ResourceBase {
+  uri: string;
+  channelType: ChannelSubtype;
+  filters: ChannelFilterCondition[];
+  timeRange?: { start: string; end: string };
+  parentGroupId: string;
+  creatorName?: string;
+}
+
+/** Paginated channel result from GWT-RPC */
+export interface ChannelPageResult {
+  channels: Channel[];
+  totalCount: number;
+}

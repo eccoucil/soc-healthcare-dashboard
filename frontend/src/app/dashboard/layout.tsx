@@ -4,19 +4,15 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  Activity,
   Bell,
   Building2,
   ChevronDown,
-  FileText,
-  Globe,
   LayoutDashboard,
   LogOut,
-  Monitor,
   Search,
   Settings,
   Shield,
-  ShieldAlert,
-  Users,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,13 +28,8 @@ import {
 
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard" },
-  { icon: ShieldAlert, label: "Alerts", href: "/dashboard/alerts", badge: 12 },
   { icon: Building2, label: "Customers", href: "/dashboard/customers" },
-  { icon: Monitor, label: "Endpoints", href: "/dashboard/endpoints" },
-  { icon: Globe, label: "Network", href: "/dashboard/network" },
-  { icon: FileText, label: "Reports", href: "/dashboard/reports" },
-  { icon: Users, label: "Users", href: "/dashboard/users" },
-  { icon: Settings, label: "Settings", href: "/dashboard/settings" },
+  { icon: Activity, label: "Channels", href: "/dashboard/channels" },
 ];
 
 export default function DashboardLayout({
@@ -93,14 +84,7 @@ export default function DashboardLayout({
               >
                 <item.icon className="w-5 h-5 flex-shrink-0" />
                 {!sidebarCollapsed && (
-                  <>
-                    <span className="flex-1 text-left">{item.label}</span>
-                    {item.badge && (
-                      <span className="bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">
-                        {item.badge}
-                      </span>
-                    )}
-                  </>
+                  <span className="flex-1 text-left">{item.label}</span>
                 )}
               </Link>
             );

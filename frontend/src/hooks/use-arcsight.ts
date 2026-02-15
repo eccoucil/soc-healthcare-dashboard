@@ -113,6 +113,24 @@ export function useAllConnectors(enabled = true): QueryResult<Connector[]> {
   return useArcsightQuery<Connector[]>(url);
 }
 
+// --- Channel hooks (Phoenix GWT-RPC) ---
+
+/** Raw GWT-RPC decoded response — will be mapped to proper types after verification */
+interface GwtRpcResponse {
+  ok: boolean;
+  values: unknown[];
+  stringTable: string[];
+}
+
+export function useChannelDebug(): QueryResult<{
+  loginOk: boolean;
+  tokenPreview: string;
+  dataMonitorResponse: GwtRpcResponse;
+  requestBody: string;
+}> {
+  return useArcsightQuery("/api/arcsight/channels/debug");
+}
+
 // --- Mutation hooks ---
 
 interface MutationResult {
