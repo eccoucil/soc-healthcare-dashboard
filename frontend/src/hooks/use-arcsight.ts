@@ -158,6 +158,15 @@ export function useActiveChannelEvents(channelId?: string): QueryResult<ChannelR
   });
 }
 
+export function useChannelEventsOnDemand(
+  channelId: string | null
+): QueryResult<ChannelResult> {
+  const url = channelId
+    ? `/api/arcsight/channels/active?channelId=${encodeURIComponent(channelId)}`
+    : null;
+  return useArcsightQuery<ChannelResult>(url, { refetchInterval: 10_000 });
+}
+
 // --- Channel listing ---
 
 interface ActiveChannelEntry {

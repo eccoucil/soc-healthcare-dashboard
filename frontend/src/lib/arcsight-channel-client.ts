@@ -1383,6 +1383,22 @@ function parseChannelListResponse(
     }
   }
 
+  // --- Extract Long timestamps from values array ---
+  // Each channel resource has createdTimestamp + modifiedTimestamp as java.lang.Long.
+  // GWT-RPC encodes Longs as: string_value (epoch ms), then longTypeRef.
+  const longTypeIdx = stringTable.findIndex((s) =>
+    s.startsWith("java.lang.Long/")
+  );
+  const longEpochs: string[] = [];
+  if (longTypeIdx >= 0) {
+    const longRef = longTypeIdx + 1; // 1-based
+    for (let i = 0; i < values.length - 1; i++) {
+      if (typeof values[i] === "string" && values[i + 1] === longRef) {
+        longEpochs.push(values[i] as string);
+      }
+    }
+  }
+
   const typeDescPattern = /^[\w.$]+\/\d+$/;
   const isTypeDesc = stringTable.map((s) => typeDescPattern.test(s));
 
@@ -1437,12 +1453,20 @@ function parseChannelListResponse(
       const ordinal = subtypeOrdinals[channels.length] ?? 0;
       const subType = RESOURCE_SUBTYPE_MAP[ordinal] ?? "";
 
+      // Map Nth channel to its timestamps (2 Longs per resource: created, modified)
+      const tsIndex = channels.length * 2 + 1; // +1 = modifiedTimestamp (2nd of pair)
+      const epochStr = longEpochs[tsIndex];
+      const epochMs = epochStr ? parseInt(epochStr, 10) : NaN;
+      const lastUpdateTime = !isNaN(epochMs)
+        ? new Date(epochMs).toISOString()
+        : null;
+
       channels.push({
         displayName,
         resourceId,
         path,
         subType,
-        lastUpdateTime: null,
+        lastUpdateTime,
         description: null,
         groupName,
       });
