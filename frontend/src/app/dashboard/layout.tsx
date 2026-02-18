@@ -41,6 +41,7 @@ export default function DashboardLayout({
   const [mounted, setMounted] = useState(false);
   const pathname = usePathname();
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration guard for Radix useId()
   useEffect(() => setMounted(true), []);
 
   return (

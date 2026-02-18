@@ -311,8 +311,6 @@ function ChannelCanvasView() {
     return () => clearInterval(timer);
   }, [filteredChannels]);
 
-  const totalGroups = data?.groups.length ?? 0;
-
   const activeCount = allChannels.filter(
     (ch) => getChannelHealth(ch.lastUpdateTime) === "healthy"
   ).length;

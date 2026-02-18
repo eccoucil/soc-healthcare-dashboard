@@ -38,10 +38,12 @@ function useArcsightQuery<T>(
 
     let cancelled = false;
     // Only show loading spinner on initial fetch, not on polls
+    /* eslint-disable react-hooks/set-state-in-effect -- data fetching requires sync state before async call */
     if (!hasFetched.current) {
       setIsLoading(true);
     }
     setError(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
 
     fetch(url)
       .then(async (res) => {

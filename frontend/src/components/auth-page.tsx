@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { motion } from "motion/react";
@@ -28,8 +28,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   validatePassword,
   passwordsMatch,
-  type PasswordStrength,
-  type PasswordRequirements,
 } from "@/lib/password-validation";
 import { createClient } from "@/lib/supabase/client";
 import { useConnectorHealth } from "@/hooks/use-arcsight";
@@ -40,7 +38,7 @@ export const AuthPage = () => {
   const router = useRouter();
   const supabase = createClient();
   const { data: health } = useConnectorHealth();
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  const isDarkMode = true;
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loginEmail, setLoginEmail] = useState("");
@@ -48,9 +46,6 @@ export const AuthPage = () => {
   const [registerEmail, setRegisterEmail] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [passwordStrength, setPasswordStrength] = useState<PasswordStrength | null>(null);
-  const [passwordRequirements, setPasswordRequirements] = useState<PasswordRequirements | null>(null);
-
   // Toggle dark mode class on html/body
   useEffect(() => {
     if (isDarkMode) {
@@ -60,16 +55,11 @@ export const AuthPage = () => {
     }
   }, [isDarkMode]);
 
-  // Real-time password validation for registration
-  useEffect(() => {
-    if (registerPassword) {
-      const validation = validatePassword(registerPassword);
-      setPasswordStrength(validation.strength);
-      setPasswordRequirements(validation.requirements);
-    } else {
-      setPasswordStrength(null);
-      setPasswordRequirements(null);
-    }
+  // Derive password validation from current input (no effect needed)
+  const { passwordStrength, passwordRequirements } = useMemo(() => {
+    if (!registerPassword) return { passwordStrength: null, passwordRequirements: null };
+    const validation = validatePassword(registerPassword);
+    return { passwordStrength: validation.strength, passwordRequirements: validation.requirements };
   }, [registerPassword]);
 
   const isValidEmailDomain = (email: string): boolean => {

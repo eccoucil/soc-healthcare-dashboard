@@ -99,15 +99,18 @@ export default function CustomersPage() {
     return () => clearTimeout(timer);
   }, [searchInput]);
 
-  // Reset to page 1 when search or sort changes
-  useEffect(() => {
+  // Reset to page 1 when search or sort changes (adjust state during render)
+  const pageResetKey = `${debouncedSearch}\0${sortKey}\0${sortDir}`;
+  const [prevPageResetKey, setPrevPageResetKey] = useState(pageResetKey);
+  if (pageResetKey !== prevPageResetKey) {
+    setPrevPageResetKey(pageResetKey);
     setCurrentPage(1);
-  }, [debouncedSearch, sortKey, sortDir]);
+  }
 
   const { data: customers, isLoading, error, refetch } = useCustomers(debouncedSearch);
   const { data: health } = useConnectorHealth();
 
-  const displayData: Customer[] = customers ?? [];
+  const displayData = useMemo<Customer[]>(() => customers ?? [], [customers]);
 
   // Filter → Sort → Paginate pipeline
   const filtered = useMemo(() => {

@@ -216,7 +216,7 @@ export function decodeGwtRpcResponse(raw: string): GwtRpcDecodedResponse {
   }
 
   // Strip //OK prefix
-  let arrayStr = trimmed.slice(4);
+  const arrayStr = trimmed.slice(4);
 
   // Handle .concat() splitting — GWT splits large responses like:
   //   [part1].concat([part2]).concat([part3])
