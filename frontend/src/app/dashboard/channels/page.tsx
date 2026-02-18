@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Activity, RefreshCw, Bug, Radio, FolderTree } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -65,10 +65,19 @@ function ChannelCircle({
   );
 }
 
+function shuffleArray<T>(arr: T[]): T[] {
+  const shuffled = [...arr];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
 function ChannelCanvasView() {
   const { data, isLoading, error, refetch } = useChannelList();
 
-  const allChannels = (() => {
+  const allChannels = useMemo(() => {
     if (!data?.groups) return [];
     const seen = new Set<string>();
     const out: Array<{ displayName: string; resourceId: string; subType: string; groupName: string }> = [];
@@ -80,7 +89,23 @@ function ChannelCanvasView() {
       }
     }
     return out;
-  })();
+  }, [data]);
+
+  const [displayChannels, setDisplayChannels] = useState(allChannels);
+
+  // Sync when underlying data changes (new fetch, added/removed channels)
+  useEffect(() => {
+    setDisplayChannels(shuffleArray(allChannels));
+  }, [allChannels]);
+
+  // Rotate positions every 60 seconds for SOC TV display
+  useEffect(() => {
+    if (allChannels.length === 0) return;
+    const timer = setInterval(() => {
+      setDisplayChannels(shuffleArray(allChannels));
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [allChannels]);
 
   const totalGroups = data?.groups.length ?? 0;
 
@@ -134,7 +159,7 @@ function ChannelCanvasView() {
         </div>
       ) : allChannels.length > 0 ? (
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-6 justify-items-center py-4">
-          {allChannels.map((ch) => (
+          {displayChannels.map((ch) => (
             <ChannelCircle key={ch.resourceId} channel={ch} />
           ))}
         </div>
