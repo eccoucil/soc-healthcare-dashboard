@@ -29,7 +29,7 @@ import {
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard" },
   { icon: Building2, label: "Customers", href: "/dashboard/customers" },
-  { icon: Activity, label: "Channels", href: "/dashboard/channels" },
+  { icon: Activity, label: "Devices", href: "/dashboard/channels" },
 ];
 
 export default function DashboardLayout({

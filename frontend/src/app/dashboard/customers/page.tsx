@@ -33,7 +33,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { mockCustomers } from "@/lib/mock-customers";
+import { useCustomers, useConnectorHealth } from "@/hooks/use-arcsight";
 import type { Customer } from "@/types/arcsight";
 
 type SortKey = "name" | "alias" | "location" | "externalID";
@@ -104,13 +104,10 @@ export default function CustomersPage() {
     setCurrentPage(1);
   }, [debouncedSearch, sortKey, sortDir]);
 
-  // API calls disabled — using mock data only
-  const isLoading = false;
-  const refetch = () => {};
-  const health = null as { live: string[] } | null;
+  const { data: customers, isLoading, error, refetch } = useCustomers(debouncedSearch);
+  const { data: health } = useConnectorHealth();
 
-  const usingMockData = false;
-  const displayData: Customer[] = mockCustomers;
+  const displayData: Customer[] = customers ?? [];
 
   // Filter → Sort → Paginate pipeline
   const filtered = useMemo(() => {
@@ -123,7 +120,7 @@ export default function CustomersPage() {
         c.externalID?.toLowerCase().includes(q) ||
         getLocationString(c).toLowerCase().includes(q)
     );
-  }, [displayData, debouncedSearch, usingMockData]);
+  }, [displayData, debouncedSearch]);
 
   const sorted = useMemo(() => {
     return [...filtered].sort((a, b) => {
@@ -184,12 +181,12 @@ export default function CustomersPage() {
         </div>
       </div>
 
-      {/* Mock data banner */}
-      {usingMockData && (
-        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20">
-          <TriangleAlert className="w-4 h-4 text-amber-400 shrink-0" />
-          <p className="text-sm text-amber-300">
-            Showing sample data — API unavailable
+      {/* Error banner */}
+      {error && (
+        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
+          <TriangleAlert className="w-4 h-4 text-red-400 shrink-0" />
+          <p className="text-sm text-red-300">
+            API error: {error}
           </p>
         </div>
       )}
@@ -260,7 +257,7 @@ export default function CustomersPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {isLoading && !usingMockData ? (
+          {isLoading ? (
             <div className="space-y-3">
               {Array.from({ length: 5 }).map((_, i) => (
                 <Skeleton key={i} className="h-12 w-full bg-white/10" />

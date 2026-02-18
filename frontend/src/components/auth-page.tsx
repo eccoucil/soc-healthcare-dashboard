@@ -24,17 +24,22 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardFooter } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   validatePassword,
   passwordsMatch,
   type PasswordStrength,
   type PasswordRequirements,
 } from "@/lib/password-validation";
+import { createClient } from "@/lib/supabase/client";
+import { useConnectorHealth } from "@/hooks/use-arcsight";
 
 const WHITELISTED_DOMAINS = ["@eccouncil.org"];
 
 export const AuthPage = () => {
   const router = useRouter();
+  const supabase = createClient();
+  const { data: health } = useConnectorHealth();
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -73,7 +78,7 @@ export const AuthPage = () => {
     );
   };
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isValidEmailDomain(loginEmail)) {
       toast.error("Invalid email domain", {
@@ -107,17 +112,24 @@ export const AuthPage = () => {
     }
 
     setIsLoading(true);
-    // Simulate API call and redirect to dashboard
-    setTimeout(() => {
-      setIsLoading(false);
-      toast.success("Login successful", {
-        description: "Redirecting to dashboard...",
-      });
-      router.push("/dashboard");
-    }, 1500);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: loginEmail,
+      password: loginPassword,
+    });
+    setIsLoading(false);
+
+    if (error) {
+      toast.error("Login failed", { description: error.message });
+      return;
+    }
+
+    toast.success("Login successful", {
+      description: "Redirecting to dashboard...",
+    });
+    router.push("/dashboard");
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isValidEmailDomain(registerEmail)) {
       toast.error("Invalid email domain", {
@@ -166,14 +178,20 @@ export const AuthPage = () => {
     }
 
     setIsLoading(true);
-    // Simulate API call and redirect to dashboard
-    setTimeout(() => {
-      setIsLoading(false);
-      toast.success("Account created", {
-        description: "Redirecting to dashboard...",
-      });
-      router.push("/dashboard");
-    }, 1500);
+    const { error } = await supabase.auth.signUp({
+      email: registerEmail,
+      password: registerPassword,
+    });
+    setIsLoading(false);
+
+    if (error) {
+      toast.error("Registration failed", { description: error.message });
+      return;
+    }
+
+    toast.success("Account created", {
+      description: "Check your email for a verification link.",
+    });
   };
 
   return (
@@ -223,17 +241,43 @@ export const AuthPage = () => {
         <div className="relative z-10 grid grid-cols-2 gap-4 mt-auto">
           <div className="p-4 rounded-lg bg-white/5 backdrop-blur border border-white/10">
             <Server className="h-8 w-8 text-red-500 mb-2" />
-            <div className="text-2xl font-mono font-bold text-white">99.9%</div>
-            <div className="text-xs text-gray-400 uppercase tracking-wider">
-              Uptime
-            </div>
+            {health ? (
+              <>
+                <div className="text-2xl font-mono font-bold text-white">
+                  {health.live.length + health.dead.length}
+                </div>
+                <div className="text-xs text-gray-400 uppercase tracking-wider">
+                  Total Connectors
+                </div>
+              </>
+            ) : (
+              <>
+                <Skeleton className="h-8 w-16 bg-white/10 mb-1" />
+                <div className="text-xs text-gray-400 uppercase tracking-wider">
+                  Total Connectors
+                </div>
+              </>
+            )}
           </div>
           <div className="p-4 rounded-lg bg-white/5 backdrop-blur border border-white/10">
             <Globe className="h-8 w-8 text-red-500 mb-2" />
-            <div className="text-2xl font-mono font-bold text-white">142</div>
-            <div className="text-xs text-gray-400 uppercase tracking-wider">
-              Nodes Active
-            </div>
+            {health ? (
+              <>
+                <div className="text-2xl font-mono font-bold text-white">
+                  {health.live.length}
+                </div>
+                <div className="text-xs text-gray-400 uppercase tracking-wider">
+                  Nodes Active
+                </div>
+              </>
+            ) : (
+              <>
+                <Skeleton className="h-8 w-16 bg-white/10 mb-1" />
+                <div className="text-xs text-gray-400 uppercase tracking-wider">
+                  Nodes Active
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>

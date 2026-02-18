@@ -55,8 +55,15 @@ export async function GET(
     });
   }
 
-  // Step 2: Get group children
-  const parentGroupId = (step1.data as string[])[0];
+  // Step 2: Get group children — path is slash-delimited "root/.../parent/customer"
+  const segments = ((step1.data as string[])[0]).split("/");
+  if (segments.length < 2) {
+    report.step2_groupChildren = { status: "skipped", reason: "customer is at root level" };
+    report.step3_connectors = { status: "skipped", reason: "step 2 skipped" };
+    report.step4_devices = { status: "skipped", reason: "step 2 skipped" };
+    return Response.json(report, { headers: { "Cache-Control": "no-store" } });
+  }
+  const parentGroupId = segments[segments.length - 2];
   const step2 = await runStep(() => getGroupChildren(parentGroupId));
   report.step2_groupChildren = step2;
 

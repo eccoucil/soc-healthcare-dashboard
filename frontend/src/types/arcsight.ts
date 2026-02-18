@@ -55,6 +55,26 @@ export interface ConnectorHealth {
   total: number;
 }
 
+/** Per-connector health detail with live/dead classification */
+export interface ConnectorHealthDetail {
+  resourceId: string;
+  name: string;
+  status: "live" | "dead";
+  operationalStatus?: string;
+  alive?: boolean;
+  disabled?: boolean;
+  disabledReason?: string;
+  inactive?: boolean;
+  inactiveReason?: string;
+  owningServer?: string;
+}
+
+/** Enriched health response: full details + summary counts */
+export interface ConnectorHealthEnriched {
+  connectors: ConnectorHealthDetail[];
+  summary: { live: number; dead: number; total: number };
+}
+
 /** Request body for linking/unlinking connectors to a customer */
 export interface LinkConnectorsRequest {
   connectorIds: string[];

@@ -6,6 +6,7 @@ import type {
   Connector,
   ConnectorWithDevices,
   ConnectorHealth,
+  ConnectorHealthEnriched,
 } from "@/types/arcsight";
 
 interface QueryResult<T> {
@@ -108,6 +109,13 @@ export function useConnectorHealth(): QueryResult<ConnectorHealth> {
   });
 }
 
+export function useConnectorHealthDetailed(): QueryResult<ConnectorHealthEnriched> {
+  return useArcsightQuery<ConnectorHealthEnriched>(
+    "/api/arcsight/connectors/health/detailed",
+    { refetchInterval: 30_000 }
+  );
+}
+
 export function useAllConnectors(enabled = true): QueryResult<Connector[]> {
   const url = enabled ? "/api/arcsight/connectors" : null;
   return useArcsightQuery<Connector[]>(url);
@@ -129,6 +137,55 @@ export function useChannelDebug(): QueryResult<{
   requestBody: string;
 }> {
   return useArcsightQuery("/api/arcsight/channels/debug");
+}
+
+interface ChannelEvent {
+  fields: Record<string, string | number | null>;
+}
+
+interface ChannelResult {
+  events: ChannelEvent[];
+  totalCount: number;
+  fieldNames: string[];
+}
+
+export function useActiveChannelEvents(channelId?: string): QueryResult<ChannelResult> {
+  const url = channelId
+    ? `/api/arcsight/channels/active?channelId=${encodeURIComponent(channelId)}`
+    : "/api/arcsight/channels/active";
+  return useArcsightQuery<ChannelResult>(url, {
+    refetchInterval: 10_000,
+  });
+}
+
+// --- Channel listing ---
+
+interface ActiveChannelEntry {
+  displayName: string;
+  resourceId: string;
+  path: string;
+  subType: string;
+  lastUpdateTime: string | null;
+  description: string | null;
+  groupName: string;
+}
+
+interface ChannelGroupWithChannels {
+  name: string;
+  resourceId: string;
+  path: string;
+  description: string | null;
+  channels: ActiveChannelEntry[];
+}
+
+interface ChannelListResult {
+  groups: ChannelGroupWithChannels[];
+}
+
+export function useChannelList(): QueryResult<ChannelListResult> {
+  return useArcsightQuery<ChannelListResult>("/api/arcsight/channels/list", {
+    refetchInterval: 60_000,
+  });
 }
 
 // --- Mutation hooks ---

@@ -38,7 +38,9 @@ export type GwtRpcParam =
       fields: GwtRpcParam[];
     }
   | { kind: "enum"; typeDescriptor: string; ordinal: number }
-  | { kind: "int"; value: number };
+  | { kind: "int"; value: number }
+  | { kind: "long"; value: string }
+  | { kind: "list"; typeDescriptor: string; items: GwtRpcParam[] };
 
 /**
  * Infer the GWT-RPC type descriptor for a top-level parameter.
@@ -56,6 +58,10 @@ function getTypeDescriptor(param: GwtRpcParam): string {
       return param.typeDescriptor;
     case "int":
       return "I";
+    case "long":
+      return "java.lang.Long/4227064769";
+    case "list":
+      return param.typeDescriptor;
   }
 }
 
@@ -101,14 +107,25 @@ export function buildGwtRpcRequest(
         return [param.value === null ? 0 : addString(param.value)];
       case "int":
         return [param.value];
+      case "long":
+        // java.lang.Long custom serializer: type descriptor + value as string-table ref
+        return [addString("java.lang.Long/4227064769"), addString(param.value)];
       case "enum":
-        // type marker index, then ordinal, then null terminator
-        return [addString(param.typeDescriptor), param.ordinal, 0];
+        // type marker index, then ordinal
+        return [addString(param.typeDescriptor), param.ordinal];
       case "object": {
         // type marker index, then each field serialized inline
         const parts: number[] = [addString(param.typeDescriptor)];
         for (const field of param.fields) {
           parts.push(...serializeValue(field));
+        }
+        return parts;
+      }
+      case "list": {
+        // type marker index, item count, then each item serialized inline
+        const parts: number[] = [addString(param.typeDescriptor), param.items.length];
+        for (const item of param.items) {
+          parts.push(...serializeValue(item));
         }
         return parts;
       }
@@ -189,7 +206,7 @@ export function decodeGwtRpcResponse(raw: string): GwtRpcDecodedResponse {
   // Check for error response
   if (trimmed.startsWith("//EX")) {
     const body = trimmed.slice(4);
-    throw new Error(`GWT-RPC error response: ${body.slice(0, 500)}`);
+    throw new Error(`GWT-RPC //EX error response: ${body.slice(0, 500)}`);
   }
 
   if (!trimmed.startsWith("//OK")) {
@@ -250,24 +267,26 @@ export function decodeGwtRpcResponse(raw: string): GwtRpcDecodedResponse {
 /**
  * Extract the string table from parsed GWT-RPC values.
  *
- * In GWT-RPC responses, the string table is typically the last element
- * and is itself a nested array of strings.
+ * GWT-RPC responses end with: [...payload, [string_table], flags, version].
+ * The string table is NOT necessarily the last element — numeric trailer
+ * fields (flags, version) follow it. We scan backwards to find the last
+ * array-of-strings element.
  */
 function extractStringTable(values: unknown[]): GwtRpcDecodedResponse {
-  // Find the string table — it's typically the last element that is an array of strings
   let stringTable: string[] = [];
-  let payloadValues = values;
+  let stringTableIdx = -1;
 
-  if (values.length > 0) {
-    const last = values[values.length - 1];
-    if (
-      Array.isArray(last) &&
-      (last.length === 0 || typeof last[0] === "string")
-    ) {
-      stringTable = last as string[];
-      payloadValues = values.slice(0, -1);
+  for (let i = values.length - 1; i >= 0; i--) {
+    const el = values[i];
+    if (Array.isArray(el) && (el.length === 0 || typeof el[0] === "string")) {
+      stringTable = el as string[];
+      stringTableIdx = i;
+      break;
     }
   }
+
+  const payloadValues =
+    stringTableIdx >= 0 ? values.slice(0, stringTableIdx) : values;
 
   return {
     ok: true,

@@ -14,9 +14,9 @@ npm install          # Install dependencies
 npm run dev          # Dev server at http://localhost:3000
 npm run build        # Production build (catches TypeScript errors)
 npm run lint         # ESLint
+npm test             # Jest (unit tests)
+npm test -- --testPathPattern="some-file"  # Run a single test file
 ```
-
-No test framework is configured yet.
 
 ## Environment Setup
 
@@ -28,20 +28,39 @@ Copy `frontend/.env.example` to `frontend/.env.local` and fill in ArcSight crede
 | `ARCSIGHT_LOGIN_URL` | Login endpoint for auto-authentication |
 | `ARCSIGHT_USERNAME` / `ARCSIGHT_PASSWORD` | Auto-login credentials |
 | `ARCSIGHT_API_TOKEN` | Optional static token (skips auto-login when set) |
+| `ARCSIGHT_PHOENIX_URL` | Phoenix GWT-RPC base URL (for Data Monitors) |
+| `ARCSIGHT_PHOENIX_PERMUTATION` | GWT module permutation hash (same for all services) |
+| `ARCSIGHT_PHOENIX_LOGIN_STRONG_NAME` | Serialization policy hash for LoginService |
+| `ARCSIGHT_PHOENIX_DATAMONITOR_STRONG_NAME` | Serialization policy hash for DataMonitorV2Service |
+| `ARCSIGHT_CHANNEL_STRONG_NAME` | Serialization policy hash for ChannelService |
+| `ARCSIGHT_GROUP_STRONG_NAME` | Serialization policy hash for GroupService |
+| `ARCSIGHT_DEFAULT_CHANNEL_GROUP_ID` | Default data monitor resource ID |
+| `ARCSIGHT_PROXY_URL` | Optional proxy for split tunneling (`socks5h://`, `http://`, etc.) |
 
 ## Architecture
 
-### Three-Layer Data Flow
+### Data Flow (Two Parallel Paths)
 
 ```
-ArcSight ESM API ←→ Server-side client ←→ Next.js API routes ←→ React hooks ←→ UI
+ArcSight DETECT REST API ←→ arcsight-client.ts    ←→ /api/arcsight/*     ←→ React hooks ←→ UI
+ArcSight Phoenix GWT-RPC ←→ arcsight-channel-client.ts ←→ /api/arcsight/channels/* ←→ React hooks ←→ UI
+                               ↑
+                         arcsight-dispatcher.ts (shared connection pool / proxy routing)
+                               ↑
+                         gwt-rpc-codec.ts (encode/decode GWT-RPC wire format)
 ```
 
-1. **`src/lib/arcsight-client.ts`** — Server-only ArcSight client. Uses `"server-only"` import guard, undici `Agent` with TLS skip, connection pool (6 connections), AbortController timeouts (15s default, 45s for `/connectors/devices`). Handles token management with auto-login and 401 retry.
+### Server-Side Clients
 
-2. **`src/app/api/arcsight/`** — Next.js Route Handlers that proxy to the server-side client. All responses set `Cache-Control: no-store`. Thin wrappers with try/catch → JSON error responses.
+Both clients use `"server-only"` import guard and share a dispatcher from `arcsight-dispatcher.ts` that routes through an optional proxy (`ARCSIGHT_PROXY_URL`).
 
-3. **`src/hooks/use-arcsight.ts`** — Client-side React hooks wrapping `fetch()` to the API routes. Generic `useArcsightQuery<T>` with auto-polling support. Only shows loading spinner on initial fetch, not on polls.
+1. **`src/lib/arcsight-client.ts`** — REST client for the DETECT API. Connection pool (6 connections), AbortController timeouts (15s default, 45s for `/connectors/devices`). Token management with auto-login and 401 retry.
+
+2. **`src/lib/arcsight-channel-client.ts`** — GWT-RPC client for Phoenix services (DataMonitorV2Service, ChannelService, GroupService). Separate connection pool (4 connections). Has its own token (Phoenix login returns a different token than REST API). Calls the GWT-RPC codec to build/decode pipe-delimited wire format. The `X-GWT-Permutation` header uses the module permutation hash (`ARCSIGHT_PHOENIX_PERMUTATION`), while per-service serialization policy hashes go in the request body.
+
+3. **`src/lib/arcsight-dispatcher.ts`** — Shared dispatcher factory. Creates an undici `Agent` (direct), `ProxyAgent` (HTTP CONNECT tunnel), or SOCKS5-aware `Agent` based on `ARCSIGHT_PROXY_URL`. Both clients import from here.
+
+4. **`src/lib/gwt-rpc-codec.ts`** — Pure encoder/decoder for GWT-RPC wire protocol. Builds pipe-delimited request payloads and parses `//OK[...]` response arrays. No network calls.
 
 ### Customer → Connector Resolution (critical path)
 
@@ -54,33 +73,45 @@ ArcSight has no direct "connectors for customer" API. The code bridges via a 4-s
 
 Steps 3 and 4 run in parallel via `Promise.all`. A debug endpoint at `/api/arcsight/customers/[id]/debug` runs each step individually with timing data.
 
-### Dashboard Layout
+### Proxy / Split Tunneling
 
-- **`src/app/dashboard/layout.tsx`** — Shared layout with sidebar + header. Client component with collapsible sidebar (`w-64`/`w-16`), path-based active nav highlighting.
-- **`src/app/dashboard/page.tsx`** — Main overview with stats, alerts table, activity feed. Alert data is currently hardcoded.
-- **`src/app/dashboard/customers/page.tsx`** — Customer list with search (300ms debounce), connector health stats.
-- **`src/app/dashboard/customers/[id]/page.tsx`** — Customer detail with connector table, link/unlink connector sheet.
+When `ARCSIGHT_PROXY_URL` is set, only ArcSight traffic routes through the proxy — all other traffic flows normally. Supported schemes:
+
+| Scheme | Strategy |
+|--------|----------|
+| *(empty)* | Direct connection (default) |
+| `http://` / `https://` | undici `ProxyAgent` (HTTP CONNECT tunnel) |
+| `socks5://` | SOCKS5 via `socks` package, DNS resolved locally |
+| `socks5h://` | SOCKS5 with remote DNS resolution (use when ArcSight hostname only resolves on corporate network) |
+
+Diagnostic endpoint: `GET /api/arcsight/proxy-status`
 
 ### Routes
 
 | Route | Purpose |
 |-------|---------|
 | `/` | Login page |
-| `/dashboard` | Main SOC overview |
-| `/dashboard/customers` | ArcSight customer list |
-| `/dashboard/customers/[id]` | Customer detail + connectors |
+| `/dashboard` | Main SOC overview (stats, alerts, activity feed) |
+| `/dashboard/customers` | ArcSight customer list with search |
+| `/dashboard/customers/[id]` | Customer detail + connector management |
+| `/dashboard/channels` | Data Monitor (Phoenix GWT-RPC debug view) |
 
 ### API Routes
 
-| Endpoint | Methods | Client function |
-|----------|---------|-----------------|
-| `/api/arcsight/customers` | GET | `getAllCustomers()` |
-| `/api/arcsight/customers/[id]` | GET | `getCustomerById()` |
-| `/api/arcsight/customers/[id]/connectors` | GET, POST, DELETE | `getConnectorsForCustomer()`, `link/unlinkConnectorsToCustomer()` |
-| `/api/arcsight/customers/[id]/debug` | GET | Step-by-step diagnostic report |
-| `/api/arcsight/connectors` | GET | `getAllConnectors()` |
-| `/api/arcsight/connectors/health` | GET | `getConnectorHealth()` |
-| `/api/arcsight/connectors/devices` | GET | `getConnectorDevices()` — graceful degradation on failure |
+| Endpoint | Methods | Purpose |
+|----------|---------|---------|
+| `/api/arcsight/customers` | GET | All customers |
+| `/api/arcsight/customers/[id]` | GET | Single customer |
+| `/api/arcsight/customers/[id]/connectors` | GET, POST, DELETE | Customer's connectors + link/unlink |
+| `/api/arcsight/customers/[id]/debug` | GET | Step-by-step connector resolution diagnostic |
+| `/api/arcsight/connectors` | GET | All connectors |
+| `/api/arcsight/connectors/health` | GET | Live/dead connector health |
+| `/api/arcsight/connectors/devices` | GET | Connector device map (graceful degradation) |
+| `/api/arcsight/channels` | GET | Data Monitor viewable data (GWT-RPC) |
+| `/api/arcsight/channels/[groupId]` | GET | Channel group data |
+| `/api/arcsight/channels/list` | GET | All active channel groups + channels (GWT-RPC) |
+| `/api/arcsight/channels/debug` | GET | GWT-RPC diagnostic info |
+| `/api/arcsight/proxy-status` | GET | Current proxy mode and config |
 
 ## Styling Conventions
 
@@ -100,3 +131,5 @@ Steps 3 and 4 run in parallel via `Promise.all`. A debug endpoint at `/api/arcsi
 - Tailwind CSS 4 (PostCSS plugin, not `tailwind.config.js`)
 - Batch size of 50 IDs per bulk ArcSight API call
 - React hooks auto-poll: customers at 30s, connector health at 15s
+- All API route responses set `Cache-Control: no-store`
+- undici dispatcher passed via `// @ts-expect-error` on `fetch()` calls (not in standard RequestInit type)

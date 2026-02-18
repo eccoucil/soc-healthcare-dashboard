@@ -1,11 +1,16 @@
 import "server-only";
-import { Agent } from "undici";
+import {
+  createArcsightDispatcher,
+  getProxyInfo,
+} from "@/lib/arcsight-dispatcher";
 import type {
   Customer,
   Connector,
   ConnectorDeviceMap,
   ConnectorWithDevices,
   ConnectorHealth,
+  ConnectorHealthDetail,
+  ConnectorHealthEnriched,
 } from "@/types/arcsight";
 
 const BASE_URL = process.env.ARCSIGHT_API_BASE_URL;
@@ -81,14 +86,13 @@ function clearCachedToken(): void {
   cachedToken = null;
 }
 
-// undici Agent controls the actual connection pool used by Node.js fetch.
-// Limits concurrent connections to avoid saturating the ESM server.
-const dispatcher = new Agent({
-  connect: { rejectUnauthorized: false },
+// Connection pool for ArcSight REST API — routes through proxy if configured.
+const dispatcher = createArcsightDispatcher({
   connections: 6,
   pipelining: 1,
   connectTimeout: 15_000,
 });
+console.log(`[arcsight-client] Proxy: ${getProxyInfo()}`);
 
 // --- Generic fetch wrapper ---
 
@@ -313,8 +317,13 @@ export async function getConnectorsForCustomer(
     return [];
   }
 
-  // The first path entry is the immediate parent group
-  const parentGroupId = paths[0];
+  // paths[0] is slash-delimited: "root/.../parentGroup/customer"
+  const segments = paths[0].split("/");
+  if (segments.length < 2) {
+    console.log(`${tag} Customer is at root level — no parent group`);
+    return [];
+  }
+  const parentGroupId = segments[segments.length - 2];
   const childIds = await getGroupChildren(parentGroupId);
   console.log(
     `${tag} Step 2 — group ${parentGroupId} children (${childIds.length}): ${JSON.stringify(childIds.slice(0, 10))}${childIds.length > 10 ? "…" : ""}`
@@ -361,6 +370,34 @@ export async function getConnectorHealth(): Promise<ConnectorHealth> {
     live,
     dead,
     total: live.length + dead.length,
+  };
+}
+
+/** Enriched connector health: full details tagged with live/dead status */
+export async function getConnectorHealthDetailed(): Promise<ConnectorHealthEnriched> {
+  const [health, connectors] = await Promise.all([
+    getConnectorHealth(),
+    getAllConnectors(),
+  ]);
+
+  const liveSet = new Set(health.live);
+
+  const detailed: ConnectorHealthDetail[] = connectors.map((c) => ({
+    resourceId: c.resourceId,
+    name: c.name,
+    status: liveSet.has(c.resourceId) ? ("live" as const) : ("dead" as const),
+    operationalStatus: c.operationalStatus,
+    alive: c.alive,
+    disabled: c.disabled,
+    disabledReason: c.disabledReason,
+    inactive: c.inactive,
+    inactiveReason: c.inactiveReason,
+    owningServer: c.owningServer,
+  }));
+
+  return {
+    connectors: detailed,
+    summary: { live: health.live.length, dead: health.dead.length, total: health.total },
   };
 }
 

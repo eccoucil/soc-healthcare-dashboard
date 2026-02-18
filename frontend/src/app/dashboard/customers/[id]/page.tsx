@@ -41,11 +41,13 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
-import { mockCustomers } from "@/lib/mock-customers";
 import {
-  mockConnectorsWithDevices,
-  mockAllConnectors,
-} from "@/lib/mock-connectors";
+  useCustomer,
+  useCustomerConnectors,
+  useAllConnectors,
+  useLinkConnector,
+  useUnlinkConnector,
+} from "@/hooks/use-arcsight";
 
 function getStatusBadge(status?: string) {
   switch (status?.toUpperCase()) {
@@ -241,25 +243,11 @@ export default function CustomerDetailPage({
     null
   );
 
-  // API disabled — using mock data
-  const customer = mockCustomers.find((c) => c.resourceId === id) ?? null;
-  const customerLoading = false;
-  const customerError = customer ? null : "Customer not found";
-  const connectors = mockConnectorsWithDevices;
-  const connectorsLoading = false;
-  const connectorsError = null as string | null;
-  const refetchConnectors = () => {};
-  const allConnectors = mockAllConnectors;
-  const linkConnector = {
-    mutate: async (_ids: string[]) => {},
-    isLoading: false,
-    error: null as string | null,
-  };
-  const unlinkConnector = {
-    mutate: async (_ids: string[]) => {},
-    isLoading: false,
-    error: null as string | null,
-  };
+  const { data: customer, isLoading: customerLoading, error: customerError } = useCustomer(id);
+  const { data: connectors, isLoading: connectorsLoading, error: connectorsError, refetch: refetchConnectors } = useCustomerConnectors(id);
+  const { data: allConnectors } = useAllConnectors(sheetOpen);
+  const linkConnector = useLinkConnector(id, refetchConnectors);
+  const unlinkConnector = useUnlinkConnector(id, refetchConnectors);
 
   // Filter out already-linked connectors from the selection list
   const linkedIds = useMemo(
