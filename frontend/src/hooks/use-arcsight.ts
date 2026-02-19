@@ -199,6 +199,35 @@ export function useChannelList(): QueryResult<ChannelListResult> {
   });
 }
 
+// --- Channel scan ---
+
+interface ChannelScanResult {
+  channelId: string;
+  channelName: string;
+  groupName: string;
+  subType: string;
+  hasEvents: boolean;
+  eventCount: number;
+  fieldNames: string[];
+  error?: string;
+}
+
+interface ChannelScanResponse {
+  results: ChannelScanResult[];
+  scannedAt: string;
+}
+
+/** Pass enabled=true to start scanning. Optional refetchInterval for auto-rescan. */
+export function useChannelScan(
+  enabled: boolean,
+  options?: { refetchInterval?: number }
+): QueryResult<ChannelScanResponse> {
+  const url = enabled ? "/api/arcsight/channels/scan" : null;
+  return useArcsightQuery<ChannelScanResponse>(url, {
+    refetchInterval: options?.refetchInterval,
+  });
+}
+
 // --- Mutation hooks ---
 
 interface MutationResult {
@@ -262,4 +291,47 @@ export function useUnlinkConnector(
     ? `/api/arcsight/customers/${customerId}/connectors`
     : null;
   return useArcsightMutation(url, "DELETE", onSuccess);
+}
+
+// --- REST Events hooks (Phase 3 fallback) ---
+
+interface EventCountResult {
+  startTime: number;
+  endTime: number;
+  count?: number;
+}
+
+export function useEventCount(
+  timeRangeMinutes = 60
+): QueryResult<EventCountResult> {
+  const now = Date.now();
+  const startTime = now - timeRangeMinutes * 60 * 1000;
+  return useArcsightQuery<EventCountResult>(
+    `/api/arcsight/events?mode=count&startTime=${startTime}&endTime=${now}`,
+    { refetchInterval: 30_000 }
+  );
+}
+
+export function useEventFieldInfo(): QueryResult<Record<string, unknown>> {
+  return useArcsightQuery<Record<string, unknown>>(
+    "/api/arcsight/events?mode=fields"
+  );
+}
+
+// --- Channel discovery ---
+
+interface DiscoverResult {
+  methods: { name: string; context: string }[];
+  serializationPolicy: { url: string; types: string[]; error?: string };
+  cacheJs: {
+    url: string;
+    sizeBytes: number;
+    channelServiceMethods: string[];
+    subscriptionCandidates: string[];
+    error?: string;
+  };
+}
+
+export function useChannelDiscover(): QueryResult<DiscoverResult> {
+  return useArcsightQuery<DiscoverResult>("/api/arcsight/channels/discover");
 }

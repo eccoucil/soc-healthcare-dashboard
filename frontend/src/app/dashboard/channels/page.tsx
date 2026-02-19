@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Activity, RefreshCw, Radio, X, Loader2 } from "lucide-react";
+import { Activity, RefreshCw, Radio, X, Loader2, Scan, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -23,6 +23,7 @@ import {
 import {
   useChannelList,
   useChannelEventsOnDemand,
+  useChannelScan,
 } from "@/hooks/use-arcsight";
 
 type ActivityFilter = "all" | "active" | "inactive";
@@ -49,11 +50,31 @@ const SUBTYPE_COLORS: Record<string, { ring: string; dot: string }> = {
 const DEFAULT_SUBTYPE_COLOR = { ring: "ring-gray-500/50", dot: "bg-gray-500" };
 
 type HealthStatus = "healthy" | "unhealthy";
+type HealthSource = "scan" | "estimated";
 
-function getChannelHealth(lastUpdateTime: string | null): HealthStatus {
-  if (!lastUpdateTime) return "unhealthy";
+interface HealthResult {
+  status: HealthStatus;
+  source: HealthSource;
+}
+
+function getChannelHealth(
+  lastUpdateTime: string | null,
+  scanInfo?: ScanInfo
+): HealthResult {
+  // Primary: scan results (actual event flow)
+  if (scanInfo !== undefined) {
+    return {
+      status: scanInfo.hasEvents ? "healthy" : "unhealthy",
+      source: "scan",
+    };
+  }
+  // Fallback: metadata timestamp (pre-scan estimate)
+  if (!lastUpdateTime) return { status: "unhealthy", source: "estimated" };
   const age = Date.now() - new Date(lastUpdateTime).getTime();
-  return isNaN(age) || age > 10 * 60_000 ? "unhealthy" : "healthy";
+  return {
+    status: isNaN(age) || age > 10 * 60_000 ? "unhealthy" : "healthy",
+    source: "estimated",
+  };
 }
 
 function formatFieldName(name: string): string {
@@ -70,15 +91,23 @@ function formatCellValue(value: string | number | null): string {
   return String(value);
 }
 
+interface ScanInfo {
+  hasEvents: boolean;
+  eventCount: number;
+}
+
 function ChannelCircle({
   channel,
   onClick,
+  scanInfo,
 }: {
   channel: ChannelCircleData;
   onClick: () => void;
+  scanInfo?: ScanInfo;
 }) {
   const colors = SUBTYPE_COLORS[channel.subType] ?? DEFAULT_SUBTYPE_COLOR;
-  const health = getChannelHealth(channel.lastUpdateTime);
+  const { status: health, source } = getChannelHealth(channel.lastUpdateTime, scanInfo);
+  const isEstimated = source === "estimated";
 
   return (
     <div className="flex flex-col items-center gap-2">
@@ -99,18 +128,40 @@ function ChannelCircle({
         </div>
         {/* activity dot (bottom-right) */}
         <div
-          className={`absolute bottom-0 right-0 w-3 h-3 rounded-full ring-2 ring-[#0a0a0f] ${
+          className={`absolute bottom-0 right-0 w-3 h-3 rounded-full ring-2 ring-[#0a0a0f] transition-opacity ${
             health === "healthy" ? "bg-green-500" : "bg-red-500"
-          }`}
-          title={health === "healthy" ? "Active" : "Inactive"}
+          } ${isEstimated ? "opacity-50" : ""}`}
+          title={
+            health === "healthy"
+              ? `Active (${isEstimated ? "estimated" : "confirmed"})`
+              : `Inactive (${isEstimated ? "estimated" : "confirmed"})`
+          }
         />
+        {/* scan event count badge (top-right) */}
+        {scanInfo && (
+          <div
+            className={`absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full text-[10px] font-bold flex items-center justify-center ring-2 ring-[#0a0a0f] ${
+              scanInfo.hasEvents
+                ? "bg-green-600 text-white"
+                : "bg-gray-600 text-gray-300"
+            }`}
+            title={
+              scanInfo.hasEvents
+                ? `${scanInfo.eventCount} event(s)`
+                : "No events"
+            }
+          >
+            {scanInfo.hasEvents ? scanInfo.eventCount : "0"}
+          </div>
+        )}
       </div>
       <span
-        className={`text-[10px] font-medium ${
+        className={`text-[10px] font-medium transition-opacity ${
           health === "healthy" ? "text-green-400" : "text-red-400"
-        }`}
+        } ${isEstimated ? "opacity-60" : ""}`}
       >
         {health === "healthy" ? "Active" : "Inactive"}
+        {isEstimated ? "*" : ""}
       </span>
       <span className="text-xs text-gray-300 max-w-[100px] text-center line-clamp-2">
         {channel.displayName}
@@ -262,10 +313,124 @@ function ChannelEventSheet({
   );
 }
 
+function ScanResultsTable({
+  results,
+  scannedAt,
+}: {
+  results: {
+    channelId: string;
+    channelName: string;
+    groupName: string;
+    subType: string;
+    hasEvents: boolean;
+    eventCount: number;
+    fieldNames: string[];
+    error?: string;
+  }[];
+  scannedAt: string;
+}) {
+  const withEvents = results.filter((r) => r.hasEvents);
+  const withErrors = results.filter((r) => r.error);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h3 className="text-sm font-semibold text-white">Scan Results</h3>
+          <Badge
+            variant="outline"
+            className="bg-green-500/15 text-green-400 border-green-500/20 text-xs"
+          >
+            {withEvents.length} with data
+          </Badge>
+          <Badge
+            variant="outline"
+            className="bg-gray-500/15 text-gray-400 border-gray-500/20 text-xs"
+          >
+            {results.length - withEvents.length - withErrors.length} empty
+          </Badge>
+          {withErrors.length > 0 && (
+            <Badge
+              variant="outline"
+              className="bg-red-500/15 text-red-400 border-red-500/20 text-xs"
+            >
+              {withErrors.length} error(s)
+            </Badge>
+          )}
+        </div>
+        <span className="text-xs text-gray-500">
+          Scanned {new Date(scannedAt).toLocaleTimeString()}
+        </span>
+      </div>
+      <div className="rounded-lg border border-white/10 overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow className="border-white/10 hover:bg-transparent">
+              <TableHead className="text-gray-400 text-xs">Channel</TableHead>
+              <TableHead className="text-gray-400 text-xs">Group</TableHead>
+              <TableHead className="text-gray-400 text-xs">Type</TableHead>
+              <TableHead className="text-gray-400 text-xs text-right">Events</TableHead>
+              <TableHead className="text-gray-400 text-xs">Fields</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {results.map((r) => (
+              <TableRow
+                key={r.channelId}
+                className="border-white/10 hover:bg-white/5"
+              >
+                <TableCell className="text-xs py-2">
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`w-2 h-2 rounded-full ${
+                        r.error
+                          ? "bg-red-500"
+                          : r.hasEvents
+                            ? "bg-green-500"
+                            : "bg-gray-600"
+                      }`}
+                    />
+                    <span className="text-gray-200">{r.channelName}</span>
+                  </div>
+                </TableCell>
+                <TableCell className="text-gray-400 text-xs py-2">{r.groupName}</TableCell>
+                <TableCell className="text-gray-400 text-xs py-2">{r.subType}</TableCell>
+                <TableCell className="text-right py-2">
+                  {r.error ? (
+                    <span className="text-red-400 text-xs" title={r.error}>error</span>
+                  ) : (
+                    <span
+                      className={`text-xs font-mono ${
+                        r.hasEvents ? "text-green-400" : "text-gray-600"
+                      }`}
+                    >
+                      {r.eventCount}
+                    </span>
+                  )}
+                </TableCell>
+                <TableCell className="text-gray-500 text-xs py-2 max-w-[200px] truncate">
+                  {r.fieldNames.length > 0 ? r.fieldNames.join(", ") : "\u2014"}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 function ChannelCanvasView() {
   const { data, isLoading, error, refetch } = useChannelList();
   const [selectedChannel, setSelectedChannel] = useState<ChannelCircleData | null>(null);
   const [filter, setFilter] = useState<ActivityFilter>("all");
+  const [scanEnabled, setScanEnabled] = useState(false);
+  const {
+    data: scanData,
+    isLoading: scanLoading,
+    error: scanError,
+    refetch: rescan,
+  } = useChannelScan(scanEnabled);
 
   const allChannels = useMemo(() => {
     if (!data?.groups) return [];
@@ -287,13 +452,23 @@ function ChannelCanvasView() {
     return out;
   }, [data]);
 
+  // Build lookup from scan results → per-channel event info
+  const scanMap = useMemo(() => {
+    if (!scanData?.results) return new Map<string, ScanInfo>();
+    const map = new Map<string, ScanInfo>();
+    for (const r of scanData.results) {
+      map.set(r.channelId, { hasEvents: r.hasEvents, eventCount: r.eventCount });
+    }
+    return map;
+  }, [scanData]);
+
   const filteredChannels = useMemo(() => {
     if (filter === "all") return allChannels;
     return allChannels.filter((ch) => {
-      const health = getChannelHealth(ch.lastUpdateTime);
-      return filter === "active" ? health === "healthy" : health === "unhealthy";
+      const { status } = getChannelHealth(ch.lastUpdateTime, scanMap.get(ch.resourceId));
+      return filter === "active" ? status === "healthy" : status === "unhealthy";
     });
-  }, [allChannels, filter]);
+  }, [allChannels, filter, scanMap]);
 
   const [displayChannels, setDisplayChannels] = useState(filteredChannels);
 
@@ -311,10 +486,15 @@ function ChannelCanvasView() {
     return () => clearInterval(timer);
   }, [filteredChannels]);
 
-  const activeCount = allChannels.filter(
-    (ch) => getChannelHealth(ch.lastUpdateTime) === "healthy"
-  ).length;
-  const inactiveCount = allChannels.length - activeCount;
+  const { active: activeCount, inactive: inactiveCount } = useMemo(() => {
+    let active = 0;
+    for (const ch of allChannels) {
+      if (getChannelHealth(ch.lastUpdateTime, scanMap.get(ch.resourceId)).status === "healthy") {
+        active++;
+      }
+    }
+    return { active, inactive: allChannels.length - active };
+  }, [allChannels, scanMap]);
 
   return (
     <>
@@ -367,6 +547,21 @@ function ChannelCanvasView() {
           </div>
           <Button
             variant="ghost"
+            size="sm"
+            onClick={() => { if (!scanEnabled) setScanEnabled(true); else rescan(); }}
+            disabled={scanLoading}
+            className="text-gray-400 hover:text-white gap-1.5"
+            title="Re-probe each channel for events"
+          >
+            {scanLoading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Scan className="w-4 h-4" />
+            )}
+            {scanLoading ? "Scanning..." : scanEnabled ? "Rescan" : "Scan Events"}
+          </Button>
+          <Button
+            variant="ghost"
             size="icon"
             onClick={refetch}
             className="text-gray-400 hover:text-white"
@@ -377,9 +572,24 @@ function ChannelCanvasView() {
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
-          <Activity className="w-4 h-4 text-red-400 shrink-0" />
-          <p className="text-sm text-red-300">{error}</p>
+        <div className="flex flex-col items-center gap-3 px-4 py-6 rounded-lg bg-red-500/10 border border-red-500/20">
+          <Activity className="w-6 h-6 text-red-400" />
+          <p className="text-sm text-red-300 text-center max-w-md">{error}</p>
+          {error.toLowerCase().includes("phoenix") || error.includes("fetch failed") ? (
+            <p className="text-xs text-gray-500 text-center max-w-md">
+              The REST API is working but the Phoenix GWT-RPC service is not responding.
+              Channels require the Phoenix UI application to be running on the ESM server.
+            </p>
+          ) : null}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={refetch}
+            className="text-gray-400 hover:text-white gap-1.5 mt-1"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Retry
+          </Button>
         </div>
       )}
 
@@ -392,15 +602,26 @@ function ChannelCanvasView() {
             </div>
           ))}
         </div>
-      ) : allChannels.length > 0 ? (
+      ) : displayChannels.length > 0 ? (
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-6 justify-items-center py-4">
           {displayChannels.map((ch) => (
             <ChannelCircle
               key={ch.resourceId}
               channel={ch}
               onClick={() => setSelectedChannel(ch)}
+              scanInfo={scanMap.get(ch.resourceId)}
             />
           ))}
+        </div>
+      ) : allChannels.length > 0 && filter !== "all" ? (
+        <div className="text-center py-12">
+          <Radio className="w-10 h-10 text-gray-600 mx-auto mb-3" />
+          <p className="text-gray-500">
+            No {filter} channels — try switching to &quot;All&quot;
+          </p>
+          <p className="text-xs text-gray-600 mt-1">
+            {allChannels.length} total channel{allChannels.length !== 1 ? "s" : ""} across all statuses
+          </p>
         </div>
       ) : !error ? (
         <div className="text-center py-12">
@@ -409,8 +630,35 @@ function ChannelCanvasView() {
         </div>
       ) : null}
 
+      {scanError && (
+        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
+          <Database className="w-4 h-4 text-red-400 shrink-0" />
+          <p className="text-sm text-red-300">Scan failed: {scanError}</p>
+        </div>
+      )}
+
+      {scanLoading && (
+        <div className="flex items-center justify-center gap-2 py-4">
+          <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
+          <span className="text-sm text-gray-400">
+            Opening all channels, waiting for server to buffer, then polling for events...
+          </span>
+        </div>
+      )}
+
+      {scanData && !scanLoading && (
+        <ScanResultsTable
+          results={scanData.results}
+          scannedAt={scanData.scannedAt}
+        />
+      )}
+
       <p className="text-xs text-gray-600 text-center">
-        Auto-refreshes every 60 seconds via GroupService + ChannelService
+        Channel list refreshes every 60s &middot; Event scan every 3 min
+        {scanData?.scannedAt && (
+          <> &middot; Last scan: {new Date(scanData.scannedAt).toLocaleTimeString()}</>
+        )}
+        {!scanData && !scanLoading && " &middot; * = estimated (scan pending)"}
       </p>
 
       <ChannelEventSheet

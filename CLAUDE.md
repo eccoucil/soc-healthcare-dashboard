@@ -36,6 +36,16 @@ Copy `frontend/.env.example` to `frontend/.env.local` and fill in ArcSight crede
 | `ARCSIGHT_GROUP_STRONG_NAME` | Serialization policy hash for GroupService |
 | `ARCSIGHT_DEFAULT_CHANNEL_GROUP_ID` | Default data monitor resource ID |
 | `ARCSIGHT_PROXY_URL` | Optional proxy for split tunneling (`socks5h://`, `http://`, etc.) |
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY` | Publishable key (modern `sb_publishable_...` format) |
+
+## Auth & Middleware
+
+- **Supabase SSR**: browser client (`src/lib/supabase/client.ts`), server client (`src/lib/supabase/server.ts`) via `@supabase/ssr`
+- **Middleware** (`src/middleware.ts`): refreshes session every request, guards `/dashboard/*` (redirects to `/` if no session), redirects `/` → `/dashboard` if logged in
+- Matcher excludes: `_next/static`, `_next/image`, `favicon.ico`, `api/`, static image files
+- **Domain whitelist**: `@eccouncil.org` only — enforced client-side in `src/components/auth-page.tsx`
+- **Password validation**: sanitization, XSS/SQL injection detection, strength scoring (`src/lib/password-validation.ts`)
 
 ## Architecture
 
@@ -113,6 +123,25 @@ Diagnostic endpoint: `GET /api/arcsight/proxy-status`
 | `/api/arcsight/channels/debug` | GET | GWT-RPC diagnostic info |
 | `/api/arcsight/proxy-status` | GET | Current proxy mode and config |
 
+## Hooks (`src/hooks/use-arcsight.ts`)
+
+Generic `useArcsightQuery<T>(url, options?)` pattern — returns `{ data, isLoading, error, refetch }`. Only shows loading spinner on initial fetch, not polls.
+
+| Hook | Poll Interval | Notes |
+|------|--------------|-------|
+| `useCustomers(search?)` | 30s | Optional search param |
+| `useCustomer(id)` | none | Single customer |
+| `useCustomerConnectors(customerId)` | 30s | Connectors + devices |
+| `useConnectorHealth()` | 15s | Live/dead counts |
+| `useConnectorHealthDetailed()` | 30s | Enriched with names |
+| `useAllConnectors(enabled?)` | none | Full connector list |
+| `useActiveChannelEvents(channelId?)` | 10s | Phoenix channel events |
+| `useChannelEventsOnDemand(channelId)` | 10s | Null-safe, on-demand |
+| `useChannelList()` | 60s | All groups + channels |
+| `useChannelDebug()` | none | GWT-RPC diagnostics |
+
+Mutation hooks: `useLinkConnector(customerId, onSuccess?)`, `useUnlinkConnector(customerId, onSuccess?)` — both use `useArcsightMutation` (POST/DELETE).
+
 ## Styling Conventions
 
 - Dark theme: `bg-[#0a0a0f]` (base), `bg-[#12121a]` (elevated surfaces)
@@ -125,11 +154,29 @@ Diagnostic endpoint: `GET /api/arcsight/proxy-status`
 
 ## Code Patterns
 
-- shadcn/ui (new-york style) with `@/components/ui/` — add new components via `npx shadcn@latest add <component>`
+- **shadcn/ui** (new-york style, RSC enabled, neutral base, CSS variables) with `@/components/ui/` — add via `npx shadcn@latest add <component>`. `cn()` utility in `src/lib/utils.ts` (clsx + twMerge). Installed: avatar, badge, button, card, chart, dropdown-menu, input, label, separator, sheet, sidebar, skeleton, sonner, table, tabs, tooltip
 - Path alias: `@/*` maps to `./src/*`
 - Lucide icons throughout
-- Tailwind CSS 4 (PostCSS plugin, not `tailwind.config.js`)
+- **Tailwind CSS 4**: PostCSS plugin (`@tailwindcss/postcss`), no `tailwind.config.js`. CSS uses `@import "tailwindcss"` + `@theme inline` in `globals.css`. Custom animations: `animate-alive-ping`, `animate-glow-throb` (connector health). Font: Geist Sans + Geist Mono
+- **ESLint 9+** flat config (`eslint.config.mjs`) — extends `next/core-web-vitals` + `next/typescript`
 - Batch size of 50 IDs per bulk ArcSight API call
-- React hooks auto-poll: customers at 30s, connector health at 15s
+- React hooks auto-poll: customers at 30s, connector health at 15s (see Hooks section above)
 - All API route responses set `Cache-Control: no-store`
 - undici dispatcher passed via `// @ts-expect-error` on `fetch()` calls (not in standard RequestInit type)
+
+### Key Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `@supabase/ssr` | Session management (browser + server clients) |
+| `motion` | Auth page animations |
+| `sonner` | Toast notifications (Toaster in root layout) |
+| `recharts` | Charts (installed, ready to use) |
+| `socks` | SOCKS5 proxy support |
+
+## Testing
+
+- Jest with jsdom environment (`jest.config.ts` uses `createJestConfig` from `next/jest`)
+- Coverage provider: v8
+- Minimal test suite: only `src/lib/__tests__/password-validation.test.ts`
+- No React Testing Library or API mocking setup currently

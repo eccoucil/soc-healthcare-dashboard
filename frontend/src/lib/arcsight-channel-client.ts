@@ -548,6 +548,135 @@ async function callGetChannelInfo(
   return decoded;
 }
 
+/** Set to false when the server returns IncompatibleRemoteServiceException for nav methods */
+let navigationMethodsSupported = true;
+
+/**
+ * Call a ChannelService navigation method (first / next / previous / last).
+ *
+ * These methods share the same signature as getChannelInfo:
+ *   methodName(String token, ChannelRequest request)
+ *
+ * - `first`:    Navigate to the first page of events (initial fetch after subscribe)
+ * - `next`:     Navigate forward from current bucket position (polling)
+ * - `previous`: Navigate backward
+ * - `last`:     Navigate to the last page
+ *
+ * Reuses the same ChannelRequest structure and bucket token protocol
+ * as callGetChannelInfo, but sends a different method name in the GWT-RPC
+ * payload. Uses the shared phoenixRpc() helper to avoid duplicating fetch logic.
+ *
+ * Returns null immediately if navigation methods are known to be unsupported.
+ */
+async function callChannelNavigate(
+  method: "first" | "next" | "previous" | "last",
+  token: string,
+  bucketTokens: string[] = [],
+  channelId?: string
+): Promise<GwtRpcDecodedResponse | null> {
+  if (!navigationMethodsSupported) return null;
+
+  if (!PHOENIX_URL) {
+    throw new Error(
+      "Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local"
+    );
+  }
+
+  const resolvedChannelId = channelId ?? CHANNEL_RESOURCE_ID;
+  if (!resolvedChannelId) return null;
+
+  const config: GwtRpcServiceConfig = {
+    serviceInterface:
+      "com.arcsight.product.esmclient.service.v1.client.gwt.api.ChannelService",
+    method,
+    moduleBaseUrl: MODULE_BASE,
+    strongName: CHANNEL_STRONG_NAME,
+  };
+
+  // Same ChannelRequest structure as getChannelInfo
+  const params: GwtRpcParam[] = [
+    { kind: "string", value: token },
+    {
+      kind: "object",
+      typeDescriptor:
+        "com.arcsight.product.esmclient.service.v1.model.channel.ChannelRequest/1272271556",
+      fields: [
+        {
+          kind: "object",
+          typeDescriptor:
+            "com.arcsight.product.esmclient.service.v1.model.resource.ResourceReference/2894737980",
+          fields: [
+            { kind: "string", value: resolvedChannelId },
+            { kind: "string", value: null },
+            {
+              kind: "enum",
+              typeDescriptor:
+                "com.arcsight.product.esmclient.service.v1.model.resource.ResourceType/2290386171",
+              ordinal: 33,
+            },
+            { kind: "string", value: null },
+          ],
+        },
+        {
+          kind: "object",
+          typeDescriptor:
+            "com.arcsight.product.esmclient.service.v1.model.channel.ChannelCriteria/285692488",
+          fields: [
+            { kind: "string", value: null },
+            { kind: "string", value: null },
+            {
+              kind: "object",
+              typeDescriptor:
+                "com.arcsight.product.esmclient.service.v1.model.resource.ResourceReference/2894737980",
+              fields: [
+                { kind: "string", value: null },
+                { kind: "string", value: null },
+                {
+                  kind: "enum",
+                  typeDescriptor:
+                    "com.arcsight.product.esmclient.service.v1.model.resource.ResourceType/2290386171",
+                  ordinal: 37,
+                },
+                { kind: "string", value: null },
+              ],
+            },
+            { kind: "string", value: null },
+          ],
+        },
+        {
+          kind: "list",
+          typeDescriptor: "java.util.ArrayList/4159755760",
+          items: buildBucketItems(bucketTokens),
+        },
+        { kind: "int", value: 0 },
+        { kind: "int", value: 200 },
+        { kind: "int", value: 0 },
+      ],
+    },
+  ];
+
+  const requestBody = buildGwtRpcRequest(config, params);
+  console.log(
+    `[channel-service] ${method}: ${bucketTokens.length} bucket token(s)${
+      bucketTokens.length > 0 ? ` [${bucketTokens[0].slice(0, 8)}...]` : ""
+    } channel=${resolvedChannelId.slice(0, 12)}`
+  );
+
+  const serviceUrl = `${PHOENIX_URL}/www/esmclient-service/gwt/ChannelService`;
+  try {
+    return await phoenixRpc(serviceUrl, requestBody);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("IncompatibleRemoteServiceException")) {
+      console.warn(
+        `[channel-service] Navigation method "${method}" not supported — falling back to getChannelInfo polling.`
+      );
+      navigationMethodsSupported = false;
+      return null;
+    }
+    throw err;
+  }
+}
+
 /**
  * Extract bucket cursor tokens from a ChannelService response.
  *
@@ -888,7 +1017,8 @@ export async function getActiveChannelEvents(
     return result;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if ((msg.includes("401") || msg.includes("//EX")) && !_isRetry) {
+    const isAuthError = msg.includes("401") || (msg.includes("//EX") && !msg.includes("IncompatibleRemoteServiceException"));
+    if (isAuthError && !_isRetry) {
       console.log("[channel-service] Auth error, re-authenticating...");
       clearPhoenixToken();
       lastBucketTokens = []; // Reset buckets on auth error
@@ -919,7 +1049,8 @@ export async function getActiveChannelEventsRaw(
     return (await callGetChannelInfo(token, lastBucketTokens, channelId)) ?? emptyResponse;
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if ((msg.includes("401") || msg.includes("//EX")) && !_isRetry) {
+    const isAuthError = msg.includes("401") || (msg.includes("//EX") && !msg.includes("IncompatibleRemoteServiceException"));
+    if (isAuthError && !_isRetry) {
       clearPhoenixToken();
       lastBucketTokens = [];
       const freshToken = await getPhoenixToken();
@@ -935,8 +1066,9 @@ export async function getActiveChannelEventsRaw(
  * Phase 2: With bucket tokens → actual events
  */
 export async function probeBucketPolling(channelId?: string): Promise<{
-  phase1: { tokens: string[]; eventCount: number; raw: GwtRpcDecodedResponse; requestBody: string };
-  phase2: { tokens: string[]; eventCount: number; raw: GwtRpcDecodedResponse; requestBody: string } | { error: string };
+  phase1: { tokens: string[]; eventCount: number; hasBucketType: boolean; fieldNames: string[]; raw: GwtRpcDecodedResponse; requestBody: string };
+  phase2: { tokens: string[]; eventCount: number; hasBucketType: boolean; fieldNames: string[]; raw: GwtRpcDecodedResponse; requestBody: string } | { error: string };
+  phase3?: { tokens: string[]; eventCount: number; hasBucketType: boolean; fieldNames: string[]; raw: GwtRpcDecodedResponse; requestBody: string } | { error: string };
 }> {
   const emptyDecoded: GwtRpcDecodedResponse = { ok: true, values: [], stringTable: [] };
   const token = await getPhoenixToken();
@@ -946,23 +1078,256 @@ export async function probeBucketPolling(channelId?: string): Promise<{
   const tokens1 = extractBucketTokens(decoded1);
   const parsed1 = parseChannelResult(decoded1);
   const reqBody1 = (decoded1 as { _requestBody?: string })._requestBody ?? "";
+  const hasBucket1 = decoded1.stringTable.some((s) => s.includes("ChannelBucket/"));
 
   // Phase 2: with bucket tokens from phase 1
-  let phase2: { tokens: string[]; eventCount: number; raw: GwtRpcDecodedResponse; requestBody: string } | { error: string };
+  let phase2: { tokens: string[]; eventCount: number; hasBucketType: boolean; fieldNames: string[]; raw: GwtRpcDecodedResponse; requestBody: string } | { error: string };
   try {
     const decoded2 = (await callGetChannelInfo(token, tokens1, channelId)) ?? emptyDecoded;
     const tokens2 = extractBucketTokens(decoded2);
     const parsed2 = parseChannelResult(decoded2);
     const reqBody2 = (decoded2 as { _requestBody?: string })._requestBody ?? "";
-    phase2 = { tokens: tokens2, eventCount: parsed2.events.length, raw: decoded2, requestBody: reqBody2 };
+    const hasBucket2 = decoded2.stringTable.some((s) => s.includes("ChannelBucket/"));
+    phase2 = { tokens: tokens2, eventCount: parsed2.events.length, hasBucketType: hasBucket2, fieldNames: parsed2.fieldNames, raw: decoded2, requestBody: reqBody2 };
   } catch (err) {
     phase2 = { error: err instanceof Error ? err.message : String(err) };
   }
 
+  // Phase 3: If Phase 2 returned 0 events, wait 3s and try again (server buffering)
+  let phase3: { tokens: string[]; eventCount: number; hasBucketType: boolean; fieldNames: string[]; raw: GwtRpcDecodedResponse; requestBody: string } | { error: string } | undefined;
+  const p2Events = "eventCount" in phase2 ? phase2.eventCount : 0;
+  if (p2Events === 0) {
+    try {
+      await new Promise((r) => setTimeout(r, 3000));
+      const tokensForP3 = "tokens" in phase2 && phase2.tokens.length > 0 ? phase2.tokens : tokens1;
+      const decoded3 = (await callGetChannelInfo(token, tokensForP3, channelId)) ?? emptyDecoded;
+      const tokens3 = extractBucketTokens(decoded3);
+      const parsed3 = parseChannelResult(decoded3);
+      const reqBody3 = (decoded3 as { _requestBody?: string })._requestBody ?? "";
+      const hasBucket3 = decoded3.stringTable.some((s) => s.includes("ChannelBucket/"));
+      phase3 = { tokens: tokens3, eventCount: parsed3.events.length, hasBucketType: hasBucket3, fieldNames: parsed3.fieldNames, raw: decoded3, requestBody: reqBody3 };
+    } catch (err) {
+      phase3 = { error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   return {
-    phase1: { tokens: tokens1, eventCount: parsed1.events.length, raw: decoded1, requestBody: reqBody1 },
+    phase1: { tokens: tokens1, eventCount: parsed1.events.length, hasBucketType: hasBucket1, fieldNames: parsed1.fieldNames, raw: decoded1, requestBody: reqBody1 },
     phase2,
+    phase3,
   };
+}
+
+// --- Channel scan (probe each channel for events) ---
+
+export interface ChannelScanResult {
+  channelId: string;
+  channelName: string;
+  groupName: string;
+  subType: string;
+  hasEvents: boolean;
+  eventCount: number;
+  fieldNames: string[];
+  error?: string;
+}
+
+/** Phase 1 result per channel: metadata + bucket tokens for Phase 2 */
+interface Phase1Result {
+  channelId: string;
+  tokens: string[];
+  fieldNames: string[];
+  eventCount: number;
+  hasBucketType: boolean;
+}
+
+/**
+ * Scan all active channels to determine which ones contain events.
+ *
+ * Uses a **batched two-pass** approach to handle the GWT-RPC bucket polling
+ * protocol correctly:
+ *
+ * Pass 1 (Open): Send getChannelInfo with empty buckets to every channel.
+ *   This "opens" the channel on the server, returning metadata + bucket tokens.
+ *   Concurrency: 4 (single call per channel, fits the 4-conn pool).
+ *
+ * Wait: 3 seconds for the server to buffer events for opened channels.
+ *
+ * Pass 2 (Poll): Send getChannelInfo again with the bucket tokens from Pass 1.
+ *   The server should now return actual events. Concurrency: 4.
+ *
+ * Channels that returned events in Pass 1 skip Pass 2.
+ * Channels that errored in Pass 1 are reported with their error.
+ */
+export async function scanAllChannelEvents(
+  _isRetry = false
+): Promise<{ results: ChannelScanResult[]; scannedAt: string }> {
+  const token = await getPhoenixToken();
+  const emptyDecoded: GwtRpcDecodedResponse = { ok: true, values: [], stringTable: [] };
+
+  try {
+    // Step 1: Discover all channels
+    console.log("[channel-scan] Discovering channels...");
+    const { groups } = await getAllActiveChannels();
+
+    // Flatten to a unique channel list
+    const seen = new Set<string>();
+    const channels: { channelId: string; displayName: string; groupName: string; subType: string }[] = [];
+    for (const g of groups) {
+      for (const ch of g.channels) {
+        if (seen.has(ch.resourceId)) continue;
+        seen.add(ch.resourceId);
+        channels.push({
+          channelId: ch.resourceId,
+          displayName: ch.displayName,
+          groupName: g.name,
+          subType: ch.subType,
+        });
+      }
+    }
+
+    console.log(`[channel-scan] Pass 1: Opening ${channels.length} channel(s) in batches of 4...`);
+
+    // --- Pass 1: Open all channels (single call each, 4 concurrent) ---
+    const phase1Map = new Map<string, Phase1Result>();
+    const errorMap = new Map<string, string>();
+
+    for (let i = 0; i < channels.length; i += 4) {
+      const batch = channels.slice(i, i + 4);
+      const batchResults = await Promise.allSettled(
+        batch.map(async (ch): Promise<Phase1Result> => {
+          const decoded = (await callGetChannelInfo(token, [], ch.channelId)) ?? emptyDecoded;
+          const tokens = extractBucketTokens(decoded);
+          const parsed = parseChannelResult(decoded);
+          const hasBucketType = decoded.stringTable.some((s) => s.includes("ChannelBucket/"));
+          return {
+            channelId: ch.channelId,
+            tokens,
+            fieldNames: parsed.fieldNames,
+            eventCount: parsed.events.length,
+            hasBucketType,
+          };
+        })
+      );
+
+      for (let j = 0; j < batchResults.length; j++) {
+        const r = batchResults[j];
+        const ch = batch[j];
+        if (r.status === "fulfilled") {
+          phase1Map.set(ch.channelId, r.value);
+        } else {
+          errorMap.set(ch.channelId, r.reason instanceof Error ? r.reason.message : String(r.reason));
+        }
+      }
+    }
+
+    // Diagnostic: summarize Phase 1 results
+    const withTokens = [...phase1Map.values()].filter((p) => p.tokens.length > 0).length;
+    const withEvents = [...phase1Map.values()].filter((p) => p.eventCount > 0).length;
+    const withBucketType = [...phase1Map.values()].filter((p) => p.hasBucketType).length;
+    console.log(
+      `[channel-scan] Pass 1 done: ${phase1Map.size} OK, ${errorMap.size} errors. ` +
+      `Bucket tokens: ${withTokens}, immediate events: ${withEvents}, ` +
+      `ChannelBucket in stringTable: ${withBucketType}`
+    );
+
+    // --- Pass 2: Poll channels that didn't return events yet ---
+    const needsPhase2 = channels.filter((ch) => {
+      const p1 = phase1Map.get(ch.channelId);
+      return p1 && p1.eventCount === 0;
+    });
+
+    const phase2Map = new Map<string, { eventCount: number; fieldNames: string[] }>();
+
+    if (needsPhase2.length > 0) {
+      // Wait for server to buffer events in the opened channels
+      console.log(`[channel-scan] Waiting 3s for server to buffer events...`);
+      await new Promise((r) => setTimeout(r, 3000));
+
+      console.log(`[channel-scan] Pass 2: Polling ${needsPhase2.length} channel(s) in batches of 4...`);
+
+      for (let i = 0; i < needsPhase2.length; i += 4) {
+        const batch = needsPhase2.slice(i, i + 4);
+        const batchResults = await Promise.allSettled(
+          batch.map(async (ch) => {
+            const p1 = phase1Map.get(ch.channelId)!;
+            // Use bucket tokens from Phase 1 if available, otherwise empty
+            const decoded = (await callGetChannelInfo(token, p1.tokens, ch.channelId)) ?? emptyDecoded;
+            const parsed = parseChannelResult(decoded);
+            return {
+              channelId: ch.channelId,
+              eventCount: parsed.events.length,
+              fieldNames: parsed.fieldNames.length > 0 ? parsed.fieldNames : p1.fieldNames,
+            };
+          })
+        );
+
+        for (let j = 0; j < batchResults.length; j++) {
+          const r = batchResults[j];
+          const ch = batch[j];
+          if (r.status === "fulfilled") {
+            phase2Map.set(ch.channelId, r.value);
+          } else {
+            // Phase 2 error — keep Phase 1 results, don't overwrite
+            const errMsg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+            if (!errorMap.has(ch.channelId)) {
+              errorMap.set(ch.channelId, `Phase 2: ${errMsg}`);
+            }
+          }
+        }
+      }
+
+      const phase2Events = [...phase2Map.values()].filter((p) => p.eventCount > 0).length;
+      console.log(`[channel-scan] Pass 2 done: ${phase2Events} channel(s) returned events`);
+    }
+
+    // --- Build final results ---
+    const results: ChannelScanResult[] = channels.map((ch) => {
+      const err = errorMap.get(ch.channelId);
+      if (err) {
+        return {
+          channelId: ch.channelId,
+          channelName: ch.displayName,
+          groupName: ch.groupName,
+          subType: ch.subType,
+          hasEvents: false,
+          eventCount: 0,
+          fieldNames: phase1Map.get(ch.channelId)?.fieldNames ?? [],
+          error: err,
+        };
+      }
+
+      const p2 = phase2Map.get(ch.channelId);
+      const p1 = phase1Map.get(ch.channelId);
+
+      // Prefer Phase 2 results (more likely to have events), fall back to Phase 1
+      const eventCount = p2?.eventCount ?? p1?.eventCount ?? 0;
+      const fieldNames = (p2?.fieldNames?.length ? p2.fieldNames : p1?.fieldNames) ?? [];
+
+      return {
+        channelId: ch.channelId,
+        channelName: ch.displayName,
+        groupName: ch.groupName,
+        subType: ch.subType,
+        hasEvents: eventCount > 0,
+        eventCount,
+        fieldNames,
+      };
+    });
+
+    const totalWithEvents = results.filter((r) => r.hasEvents).length;
+    console.log(
+      `[channel-scan] Done: ${totalWithEvents}/${results.length} channels have events`
+    );
+    return { results, scannedAt: new Date().toISOString() };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if ((msg.includes("401") || msg.includes("//EX")) && !_isRetry) {
+      console.log("[channel-scan] Auth error, re-authenticating...");
+      clearPhoenixToken();
+      return scanAllChannelEvents(true);
+    }
+    throw error;
+  }
 }
 
 // --- Channel Group / Listing types ---
@@ -994,36 +1359,53 @@ async function phoenixRpc(
   serviceUrl: string,
   requestBody: string
 ): Promise<GwtRpcDecodedResponse> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PHOENIX_TIMEOUT_MS);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PHOENIX_TIMEOUT_MS);
 
-  let res: Response;
-  try {
-    res = await fetch(serviceUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "text/x-gwt-rpc; charset=utf-8",
-        "X-GWT-Module-Base": MODULE_BASE,
-        "X-GWT-Permutation": PHOENIX_PERMUTATION,
-      },
-      body: requestBody,
-      signal: controller.signal,
-      // @ts-expect-error -- undici dispatcher is not in the standard RequestInit type
-      dispatcher: phoenixDispatcher,
-    });
-  } finally {
-    clearTimeout(timer);
+    let res: Response;
+    try {
+      res = await fetch(serviceUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/x-gwt-rpc; charset=utf-8",
+          "X-GWT-Module-Base": MODULE_BASE,
+          "X-GWT-Permutation": PHOENIX_PERMUTATION,
+        },
+        body: requestBody,
+        signal: controller.signal,
+        // @ts-expect-error -- undici dispatcher is not in the standard RequestInit type
+        dispatcher: phoenixDispatcher,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      if (
+        attempt === 0 &&
+        err instanceof TypeError &&
+        String(err).includes("fetch failed")
+      ) {
+        console.warn("[phoenix-rpc] fetch failed, retrying in 2s...");
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `GWT-RPC call failed: ${res.status} ${res.statusText} — ${body.slice(0, 300)}`
+      );
+    }
+
+    const rawText = await res.text();
+    return decodeGwtRpcResponse(rawText);
   }
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(
-      `GWT-RPC call failed: ${res.status} ${res.statusText} — ${body.slice(0, 300)}`
-    );
-  }
-
-  const rawText = await res.text();
-  return decodeGwtRpcResponse(rawText);
+  // Unreachable — the loop always returns or throws — but satisfies TypeScript
+  throw new Error("Phoenix RPC failed after retries");
 }
 
 /**
@@ -1599,6 +1981,540 @@ export async function getAllActiveChannels(
       console.log("[channel-list] Auth error, re-authenticating...");
       clearPhoenixToken();
       return getAllActiveChannels(true);
+    }
+    throw error;
+  }
+}
+
+// --- Phase 1: Discover ChannelService methods ---
+
+interface DiscoveredMethod {
+  name: string;
+  context: string;
+}
+
+interface DiscoverResult {
+  methods: DiscoveredMethod[];
+  serializationPolicy: {
+    url: string;
+    types: string[];
+    error?: string;
+  };
+  cacheJs: {
+    url: string;
+    sizeBytes: number;
+    channelServiceMethods: string[];
+    subscriptionCandidates: string[];
+    error?: string;
+  };
+}
+
+/**
+ * Discover all ChannelService methods by fetching the GWT compiled JS
+ * and serialization policy files.
+ *
+ * Phase 1.1: Fetch the `.cache.js` permutation file — contains all method
+ * names as string literals near "ChannelService".
+ *
+ * Phase 1.2: Fetch the `.gwt.rpc` serialization policy — lists all
+ * serializable types, hinting at request/response objects.
+ */
+export async function discoverChannelServiceMethods(): Promise<DiscoverResult> {
+  if (!PHOENIX_URL) {
+    throw new Error("Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local");
+  }
+
+  const cacheJsUrl = `${MODULE_BASE}${PHOENIX_PERMUTATION}.cache.js`;
+  const rpcPolicyUrl = `${MODULE_BASE}${CHANNEL_STRONG_NAME}.gwt.rpc`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+
+  let cacheJsResult: DiscoverResult["cacheJs"];
+  let policyResult: DiscoverResult["serializationPolicy"];
+
+  try {
+    // Fetch both in parallel
+    const [cacheJsRes, policyRes] = await Promise.allSettled([
+      fetch(cacheJsUrl, {
+        signal: controller.signal,
+        // @ts-expect-error -- undici dispatcher
+        dispatcher: phoenixDispatcher,
+      }),
+      fetch(rpcPolicyUrl, {
+        signal: controller.signal,
+        // @ts-expect-error -- undici dispatcher
+        dispatcher: phoenixDispatcher,
+      }),
+    ]);
+
+    // --- Parse cache.js ---
+    if (cacheJsRes.status === "fulfilled" && cacheJsRes.value.ok) {
+      const jsText = await cacheJsRes.value.text();
+
+      // Extract method names near ChannelService references.
+      // GWT compiled JS assigns method names as string literals in RPC proxies.
+      const channelServiceMethods: string[] = [];
+      const subscriptionCandidates: string[] = [];
+
+      // Strategy 1: Find all string literals near ChannelService mentions
+      const methodPattern = /["'](\w+)["']/g;
+      const allMethodNames = new Set<string>();
+
+      // Find all blocks mentioning ChannelService
+      const csBlocks: string[] = [];
+      const csPattern = /ChannelService/g;
+      let csMatch;
+      while ((csMatch = csPattern.exec(jsText)) !== null) {
+        const start = Math.max(0, csMatch.index - 2000);
+        const end = Math.min(jsText.length, csMatch.index + 2000);
+        csBlocks.push(jsText.slice(start, end));
+      }
+
+      // From each block, extract method-like strings
+      const jsKeywords = new Set([
+        "function", "return", "string", "number", "object", "prototype",
+        "undefined", "boolean", "length", "apply", "call", "bind",
+        "constructor", "toString", "valueOf", "hasOwnProperty",
+        "null", "true", "false", "this", "class", "extends",
+      ]);
+
+      for (const block of csBlocks) {
+        let m;
+        while ((m = methodPattern.exec(block)) !== null) {
+          const name = m[1];
+          // Filter to Java method names (camelCase, no underscores)
+          if (
+            name.length > 3 &&
+            name.length < 60 &&
+            /^[a-z][a-zA-Z0-9]*$/.test(name) &&
+            !jsKeywords.has(name)
+          ) {
+            allMethodNames.add(name);
+          }
+        }
+      }
+
+      // Strategy 2: Search for RPC proxy patterns with ChannelService
+      const rpcProxyPattern =
+        /(?:ChannelService|channelService)[^;]*?["'](\w+)["']/gi;
+      let rpcMatch;
+      while ((rpcMatch = rpcProxyPattern.exec(jsText)) !== null) {
+        const name = rpcMatch[1];
+        if (/^[a-z][a-zA-Z0-9]{3,}$/.test(name)) {
+          allMethodNames.add(name);
+        }
+      }
+
+      channelServiceMethods.push(...allMethodNames);
+
+      // Identify subscription candidates
+      const subscriptionKeywords = [
+        "open", "start", "subscribe", "activate", "init", "begin",
+        "attach", "connect", "register", "listen", "watch",
+      ];
+      for (const name of allMethodNames) {
+        const lower = name.toLowerCase();
+        if (subscriptionKeywords.some((kw) => lower.includes(kw))) {
+          subscriptionCandidates.push(name);
+        }
+      }
+
+      cacheJsResult = {
+        url: cacheJsUrl,
+        sizeBytes: jsText.length,
+        channelServiceMethods: channelServiceMethods.sort(),
+        subscriptionCandidates: subscriptionCandidates.sort(),
+      };
+    } else {
+      const errMsg =
+        cacheJsRes.status === "rejected"
+          ? cacheJsRes.reason instanceof Error
+            ? cacheJsRes.reason.message
+            : String(cacheJsRes.reason)
+          : `HTTP ${(cacheJsRes as PromiseFulfilledResult<Response>).value.status}`;
+      cacheJsResult = {
+        url: cacheJsUrl,
+        sizeBytes: 0,
+        channelServiceMethods: [],
+        subscriptionCandidates: [],
+        error: errMsg,
+      };
+    }
+
+    // --- Parse serialization policy ---
+    if (policyRes.status === "fulfilled" && policyRes.value.ok) {
+      const policyText = await policyRes.value.text();
+
+      // .gwt.rpc format: each line has comma-separated values with type name
+      const types: string[] = [];
+      for (const line of policyText.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("@")) continue;
+        const parts = trimmed.split(",").map((s) => s.trim());
+        // Type name is typically in column 4
+        if (parts.length >= 4) {
+          const typeName = parts[3];
+          if (typeName && typeName.includes(".")) {
+            types.push(typeName);
+          }
+        }
+        // Also check column 1 for older formats
+        if (parts.length >= 1 && parts[0].includes(".") && parts[0].includes("arcsight")) {
+          types.push(parts[0]);
+        }
+      }
+
+      policyResult = {
+        url: rpcPolicyUrl,
+        types: [...new Set(types)].sort(),
+      };
+    } else {
+      const errMsg =
+        policyRes.status === "rejected"
+          ? policyRes.reason instanceof Error
+            ? policyRes.reason.message
+            : String(policyRes.reason)
+          : `HTTP ${(policyRes as PromiseFulfilledResult<Response>).value.status}`;
+      policyResult = {
+        url: rpcPolicyUrl,
+        types: [],
+        error: errMsg,
+      };
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // Combine known methods with discovered ones
+  const knownMethods: DiscoveredMethod[] = [
+    { name: "getChannelInfo", context: "Currently used — fetches channel metadata + events" },
+    { name: "getGroupChildrenResourcesWithRequest", context: "Currently used — lists channels in a group" },
+  ];
+
+  for (const name of cacheJsResult.subscriptionCandidates) {
+    if (!knownMethods.some((m) => m.name === name)) {
+      knownMethods.push({
+        name,
+        context: "SUBSCRIPTION CANDIDATE — discovered in compiled GWT JS",
+      });
+    }
+  }
+
+  return {
+    methods: knownMethods,
+    serializationPolicy: policyResult,
+    cacheJs: cacheJsResult,
+  };
+}
+
+// --- Phase 2: Channel subscription ---
+
+/** Track which channels have active server-side subscriptions */
+const subscribedChannels = new Set<string>();
+
+/** Per-channel bucket token storage (replaces the global lastBucketTokens) */
+const channelBucketTokens = new Map<string, string[]>();
+
+/**
+ * Open/subscribe to a channel and fetch the first page of events.
+ *
+ * ArcSight's ChannelService has a two-step protocol:
+ *   1. `getChannelInfo` — opens the channel, returns metadata + bucket tokens
+ *   2. `first` — navigates to the first page of events using those tokens
+ *
+ * Without the `first` call, only metadata is returned (0 events).
+ * Returns the result of the `first` call so the caller can use it immediately.
+ */
+async function ensureChannelSubscribed(
+  token: string,
+  channelId: string
+): Promise<{ tokens: string[]; result: ChannelResult }> {
+  const empty: ChannelResult = { events: [], totalCount: 0, fieldNames: [] };
+
+  console.log(`[channel-service] Opening channel ${channelId.slice(0, 12)}...`);
+
+  // Step 1: getChannelInfo — opens the channel, returns metadata + bucket tokens
+  const metaDecoded = await callGetChannelInfo(token, [], channelId);
+  const metaTokens = metaDecoded ? extractBucketTokens(metaDecoded) : [];
+
+  // Step 2: Try navigation, fall back to getChannelInfo re-poll
+  const firstDecoded = await callChannelNavigate("first", token, metaTokens, channelId);
+
+  let resultDecoded: GwtRpcDecodedResponse | null;
+  if (firstDecoded) {
+    resultDecoded = firstDecoded;
+  } else if (metaTokens.length > 0) {
+    // Navigation unavailable — re-poll with bucket tokens (v1 fallback)
+    resultDecoded = await callGetChannelInfo(token, metaTokens, channelId);
+  } else {
+    resultDecoded = metaDecoded;
+  }
+
+  const resultTokens = resultDecoded ? extractBucketTokens(resultDecoded) : metaTokens;
+  const result = resultDecoded ? parseChannelResult(resultDecoded) : empty;
+
+  // Store bucket tokens for subsequent polls
+  if (resultTokens.length > 0) {
+    channelBucketTokens.set(channelId, resultTokens);
+    lastBucketTokens = resultTokens;
+  } else if (metaTokens.length > 0) {
+    channelBucketTokens.set(channelId, metaTokens);
+    lastBucketTokens = metaTokens;
+  }
+
+  subscribedChannels.add(channelId);
+  console.log(
+    `[channel-service] Channel ${channelId.slice(0, 12)} opened: ` +
+    `${result.events.length} events, ${resultTokens.length} tokens`
+  );
+
+  return { tokens: resultTokens, result };
+}
+
+/**
+ * Clear subscription state (used on auth errors).
+ */
+function clearSubscriptions(): void {
+  subscribedChannels.clear();
+  channelBucketTokens.clear();
+  lastBucketTokens = [];
+}
+
+/**
+ * Fetch active channel events with navigation-aware flow.
+ *
+ * First call:  getChannelInfo → first → returns initial events
+ * Subsequent:  next (with stored bucket tokens) → returns new events
+ *
+ * No more sleep-and-retry — the `first` / `next` navigation methods
+ * return events directly.
+ */
+export async function getActiveChannelEventsWithSubscription(
+  channelId: string,
+  _isRetry = false
+): Promise<ChannelResult> {
+  const token = await getPhoenixToken();
+  const empty: ChannelResult = { events: [], totalCount: 0, fieldNames: [] };
+
+  try {
+    // First call: open + first (returns initial events immediately)
+    if (!subscribedChannels.has(channelId)) {
+      const { result } = await ensureChannelSubscribed(token, channelId);
+      return result;
+    }
+
+    // Subsequent polls: try "next", fall back to getChannelInfo
+    const bucketTokens = channelBucketTokens.get(channelId) ?? lastBucketTokens;
+    const decoded = await callChannelNavigate("next", token, bucketTokens, channelId)
+      ?? await callGetChannelInfo(token, bucketTokens, channelId);
+
+    if (!decoded) return empty;
+
+    // Update bucket tokens for next poll
+    const newTokens = extractBucketTokens(decoded);
+    if (newTokens.length > 0) {
+      channelBucketTokens.set(channelId, newTokens);
+      lastBucketTokens = newTokens;
+    }
+
+    return parseChannelResult(decoded);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    const isAuthError = msg.includes("401") || (msg.includes("//EX") && !msg.includes("IncompatibleRemoteServiceException"));
+    if (isAuthError && !_isRetry) {
+      console.log("[channel-service] Auth error, re-authenticating...");
+      clearPhoenixToken();
+      clearSubscriptions();
+      return getActiveChannelEventsWithSubscription(channelId, true);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Scan all channels using navigation methods.
+ *
+ * Pass 1: getChannelInfo per channel → metadata + bucket tokens (opens the channel)
+ * Pass 2: first per channel → actual events (no sleep needed)
+ *
+ * The `first` navigation method returns events directly — the old 3s
+ * "server buffering wait" was a workaround for only using getChannelInfo.
+ */
+export async function scanAllChannelEventsWithSubscription(
+  _isRetry = false
+): Promise<{ results: ChannelScanResult[]; scannedAt: string }> {
+  const token = await getPhoenixToken();
+  const emptyDecoded: GwtRpcDecodedResponse = { ok: true, values: [], stringTable: [] };
+
+  try {
+    console.log("[channel-scan-v2] Discovering channels...");
+    const { groups } = await getAllActiveChannels();
+
+    const seen = new Set<string>();
+    const channels: { channelId: string; displayName: string; groupName: string; subType: string }[] = [];
+    for (const g of groups) {
+      for (const ch of g.channels) {
+        if (seen.has(ch.resourceId)) continue;
+        seen.add(ch.resourceId);
+        channels.push({
+          channelId: ch.resourceId,
+          displayName: ch.displayName,
+          groupName: g.name,
+          subType: ch.subType,
+        });
+      }
+    }
+
+    // --- Pass 1: getChannelInfo (open) all channels → metadata + bucket tokens ---
+    console.log(`[channel-scan-v2] Pass 1: Opening ${channels.length} channel(s)...`);
+
+    const phase1Map = new Map<string, Phase1Result>();
+    const errorMap = new Map<string, string>();
+
+    for (let i = 0; i < channels.length; i += 4) {
+      const batch = channels.slice(i, i + 4);
+      const batchResults = await Promise.allSettled(
+        batch.map(async (ch): Promise<Phase1Result> => {
+          const decoded = (await callGetChannelInfo(token, [], ch.channelId)) ?? emptyDecoded;
+          const tokens = extractBucketTokens(decoded);
+          const parsed = parseChannelResult(decoded);
+          const hasBucketType = decoded.stringTable.some((s) => s.includes("ChannelBucket/"));
+
+          subscribedChannels.add(ch.channelId);
+          if (tokens.length > 0) {
+            channelBucketTokens.set(ch.channelId, tokens);
+          }
+
+          return {
+            channelId: ch.channelId,
+            tokens,
+            fieldNames: parsed.fieldNames,
+            eventCount: parsed.events.length,
+            hasBucketType,
+          };
+        })
+      );
+
+      for (let j = 0; j < batchResults.length; j++) {
+        const r = batchResults[j];
+        const ch = batch[j];
+        if (r.status === "fulfilled") {
+          phase1Map.set(ch.channelId, r.value);
+        } else {
+          errorMap.set(ch.channelId, r.reason instanceof Error ? r.reason.message : String(r.reason));
+        }
+      }
+    }
+
+    const withTokens = [...phase1Map.values()].filter((p) => p.tokens.length > 0).length;
+    console.log(
+      `[channel-scan-v2] Pass 1: ${phase1Map.size} OK, ${errorMap.size} errors. ` +
+      `Bucket tokens: ${withTokens}`
+    );
+
+    // --- Pass 2: "first" navigation → actual events (no sleep needed) ---
+    const needsPhase2 = channels.filter((ch) => {
+      const p1 = phase1Map.get(ch.channelId);
+      return p1 && p1.eventCount === 0;
+    });
+
+    const phase2Map = new Map<string, { eventCount: number; fieldNames: string[] }>();
+
+    if (needsPhase2.length > 0) {
+      if (!navigationMethodsSupported) {
+        console.log(`[channel-scan-v2] Navigation unavailable — waiting 3s for server to buffer events...`);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      console.log(`[channel-scan-v2] Pass 2: Fetching events on ${needsPhase2.length} channel(s)...`);
+
+      for (let i = 0; i < needsPhase2.length; i += 4) {
+        const batch = needsPhase2.slice(i, i + 4);
+        const batchResults = await Promise.allSettled(
+          batch.map(async (ch) => {
+            const p1 = phase1Map.get(ch.channelId)!;
+            const tokens = channelBucketTokens.get(ch.channelId) ?? p1.tokens;
+            const decoded = (await callChannelNavigate("first", token, tokens, ch.channelId))
+              ?? (await callGetChannelInfo(token, tokens, ch.channelId))
+              ?? emptyDecoded;
+            const parsed = parseChannelResult(decoded);
+
+            const newTokens = extractBucketTokens(decoded);
+            if (newTokens.length > 0) {
+              channelBucketTokens.set(ch.channelId, newTokens);
+            }
+
+            return {
+              channelId: ch.channelId,
+              eventCount: parsed.events.length,
+              fieldNames: parsed.fieldNames.length > 0 ? parsed.fieldNames : p1.fieldNames,
+            };
+          })
+        );
+
+        for (let j = 0; j < batchResults.length; j++) {
+          const r = batchResults[j];
+          const ch = batch[j];
+          if (r.status === "fulfilled") {
+            phase2Map.set(ch.channelId, r.value);
+          } else {
+            const errMsg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+            if (!errorMap.has(ch.channelId)) {
+              errorMap.set(ch.channelId, `Phase 2: ${errMsg}`);
+            }
+          }
+        }
+      }
+
+      const phase2Events = [...phase2Map.values()].filter((p) => p.eventCount > 0).length;
+      console.log(`[channel-scan-v2] Pass 2: ${phase2Events} channel(s) returned events`);
+    }
+
+    // --- Build results ---
+    const results: ChannelScanResult[] = channels.map((ch) => {
+      const err = errorMap.get(ch.channelId);
+      if (err) {
+        return {
+          channelId: ch.channelId,
+          channelName: ch.displayName,
+          groupName: ch.groupName,
+          subType: ch.subType,
+          hasEvents: false,
+          eventCount: 0,
+          fieldNames: phase1Map.get(ch.channelId)?.fieldNames ?? [],
+          error: err,
+        };
+      }
+
+      const p2 = phase2Map.get(ch.channelId);
+      const p1 = phase1Map.get(ch.channelId);
+      const eventCount = p2?.eventCount ?? p1?.eventCount ?? 0;
+      const fieldNames = (p2?.fieldNames?.length ? p2.fieldNames : p1?.fieldNames) ?? [];
+
+      return {
+        channelId: ch.channelId,
+        channelName: ch.displayName,
+        groupName: ch.groupName,
+        subType: ch.subType,
+        hasEvents: eventCount > 0,
+        eventCount,
+        fieldNames,
+      };
+    });
+
+    const totalWithEvents = results.filter((r) => r.hasEvents).length;
+    console.log(
+      `[channel-scan-v2] Done: ${totalWithEvents}/${results.length} channels have events`
+    );
+    return { results, scannedAt: new Date().toISOString() };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    const isAuthError = msg.includes("401") || (msg.includes("//EX") && !msg.includes("IncompatibleRemoteServiceException"));
+    if (isAuthError && !_isRetry) {
+      console.log("[channel-scan-v2] Auth error, re-authenticating...");
+      clearPhoenixToken();
+      clearSubscriptions();
+      return scanAllChannelEventsWithSubscription(true);
     }
     throw error;
   }

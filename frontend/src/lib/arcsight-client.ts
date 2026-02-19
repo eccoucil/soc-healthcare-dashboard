@@ -431,3 +431,110 @@ export async function getAllCustomers(search?: string): Promise<Customer[]> {
 
   return customers;
 }
+
+// --- Events methods ---
+
+/**
+ * POST with JSON response (unlike arcsightPost which returns void).
+ * Used for events/retrieve which returns SecurityEvent[].
+ */
+async function arcsightPostJson<T>(
+  path: string,
+  body: unknown,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  _isRetry = false
+): Promise<T> {
+  if (!BASE_URL) {
+    throw new Error(
+      "ArcSight API not configured. Set ARCSIGHT_API_BASE_URL in .env.local"
+    );
+  }
+
+  const token = await getToken();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(`${BASE_URL}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+      // @ts-expect-error -- undici dispatcher is not in the standard RequestInit type
+      dispatcher,
+    });
+
+    if (res.status === 401 && !_isRetry) {
+      clearTimeout(timer);
+      console.log(`[arcsight] 401 on POST ${path} — re-authenticating`);
+      clearCachedToken();
+      return arcsightPostJson<T>(path, body, timeoutMs, true);
+    }
+
+    if (!res.ok) {
+      throw new Error(`ArcSight API error: ${res.status} ${res.statusText}`);
+    }
+
+    return res.json() as Promise<T>;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface SecurityEventsRequest {
+  ids: number[];
+  startTime: number;
+  endTime: number;
+}
+
+export interface SecurityEvent {
+  [key: string]: unknown;
+}
+
+export interface EventCountResponse {
+  count?: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Retrieve events by IDs and time range.
+ * POST /v1/events/retrieve
+ */
+export async function retrieveEvents(
+  request: SecurityEventsRequest
+): Promise<SecurityEvent[]> {
+  return arcsightPostJson<SecurityEvent[]>(
+    "/v1/events/retrieve",
+    request,
+    30_000 // Events can be slow
+  );
+}
+
+/**
+ * Count events in a time range.
+ * GET /v1/events/count?startTime=...&endTime=...
+ */
+export async function getEventCount(
+  startTime: number,
+  endTime: number
+): Promise<EventCountResponse> {
+  return arcsightFetch<EventCountResponse>(
+    `/v1/events/count?startTime=${startTime}&endTime=${endTime}`,
+    0 // No revalidation cache
+  );
+}
+
+/**
+ * Get event field info map (metadata about all possible event fields).
+ * GET /v1/events/getEventFieldInfoMap
+ */
+export async function getEventFieldInfoMap(): Promise<Record<string, unknown>> {
+  return arcsightFetch<Record<string, unknown>>(
+    "/v1/events/getEventFieldInfoMap",
+    300 // Cache for 5 minutes
+  );
+}

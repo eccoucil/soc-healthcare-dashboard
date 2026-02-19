@@ -10,7 +10,7 @@ export async function GET(request: Request) {
 
   try {
     if (probe) {
-      const result = await probeBucketPolling();
+      const result = await probeBucketPolling(resourceId);
       return Response.json(result, {
         headers: { "Cache-Control": "no-store" },
       });
