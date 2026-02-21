@@ -10,8 +10,8 @@ export interface ResourceBase {
   modifiedTimestamp?: number;
 }
 
-/** ArcSight Customer resource */
-export interface Customer extends ResourceBase {
+/** ArcSight Client resource (mapped from ArcSight "Customer") */
+export interface Client extends ResourceBase {
   address?: string;
   city?: string;
   addressState?: string;
@@ -75,7 +75,7 @@ export interface ConnectorHealthEnriched {
   summary: { live: number; dead: number; total: number };
 }
 
-/** Request body for linking/unlinking connectors to a customer */
+/** Request body for linking/unlinking connectors to a client */
 export interface LinkConnectorsRequest {
   connectorIds: string[];
 }

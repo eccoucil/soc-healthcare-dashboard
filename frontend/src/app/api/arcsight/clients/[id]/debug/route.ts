@@ -1,5 +1,5 @@
 import {
-  getCustomerPathsToRoot,
+  getClientPathsToRoot,
   getGroupChildren,
   getConnectorsByIds,
   getConnectorDevices,
@@ -30,14 +30,14 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id: customerId } = await params;
+  const { id: clientId } = await params;
 
-  const report: Record<string, StepResult> & { customerId: string } = {
-    customerId,
+  const report: Record<string, StepResult> & { clientId: string } = {
+    clientId,
   } as never;
 
   // Step 1: Get paths to root
-  const step1 = await runStep(() => getCustomerPathsToRoot(customerId));
+  const step1 = await runStep(() => getClientPathsToRoot(clientId));
   report.step1_pathsToRoot = step1;
 
   if (step1.status !== "ok" || (step1.data as string[]).length === 0) {
@@ -46,7 +46,7 @@ export async function GET(
       reason:
         step1.status === "error"
           ? "step 1 failed"
-          : "customer has no parent group — no connectors possible",
+          : "client has no parent group — no connectors possible",
     };
     report.step3_connectors = { status: "skipped", reason: "step 2 skipped" };
     report.step4_devices = { status: "skipped", reason: "step 2 skipped" };
@@ -55,10 +55,10 @@ export async function GET(
     });
   }
 
-  // Step 2: Get group children — path is slash-delimited "root/.../parent/customer"
+  // Step 2: Get group children — path is slash-delimited "root/.../parent/client"
   const segments = ((step1.data as string[])[0]).split("/");
   if (segments.length < 2) {
-    report.step2_groupChildren = { status: "skipped", reason: "customer is at root level" };
+    report.step2_groupChildren = { status: "skipped", reason: "client is at root level" };
     report.step3_connectors = { status: "skipped", reason: "step 2 skipped" };
     report.step4_devices = { status: "skipped", reason: "step 2 skipped" };
     return Response.json(report, { headers: { "Cache-Control": "no-store" } });

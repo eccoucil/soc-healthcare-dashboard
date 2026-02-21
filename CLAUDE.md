@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SOC (Security Operations Center) dashboard for healthcare environments. Next.js 16 frontend with ArcSight ESM integration for real-time connector/customer monitoring. Dark-themed UI optimized for security operations.
+SOC (Security Operations Center) dashboard for healthcare environments. Next.js 16 frontend with ArcSight ESM integration for real-time connector/client monitoring. Dark-themed UI optimized for security operations.
 
 ## Commands
 
@@ -35,6 +35,7 @@ Copy `frontend/.env.example` to `frontend/.env.local` and fill in ArcSight crede
 | `ARCSIGHT_CHANNEL_STRONG_NAME` | Serialization policy hash for ChannelService |
 | `ARCSIGHT_GROUP_STRONG_NAME` | Serialization policy hash for GroupService |
 | `ARCSIGHT_DEFAULT_CHANNEL_GROUP_ID` | Default data monitor resource ID |
+| `ARCSIGHT_REPORT_STRONG_NAME` | Serialization policy hash for ReportService (auto-discovered if blank) |
 | `ARCSIGHT_PROXY_URL` | Optional proxy for split tunneling (`socks5h://`, `http://`, etc.) |
 | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_DEFAULT_KEY` | Publishable key (modern `sb_publishable_...` format) |
@@ -66,22 +67,22 @@ Both clients use `"server-only"` import guard and share a dispatcher from `arcsi
 
 1. **`src/lib/arcsight-client.ts`** — REST client for the DETECT API. Connection pool (6 connections), AbortController timeouts (15s default, 45s for `/connectors/devices`). Token management with auto-login and 401 retry.
 
-2. **`src/lib/arcsight-channel-client.ts`** — GWT-RPC client for Phoenix services (DataMonitorV2Service, ChannelService, GroupService). Separate connection pool (4 connections). Has its own token (Phoenix login returns a different token than REST API). Calls the GWT-RPC codec to build/decode pipe-delimited wire format. The `X-GWT-Permutation` header uses the module permutation hash (`ARCSIGHT_PHOENIX_PERMUTATION`), while per-service serialization policy hashes go in the request body.
+2. **`src/lib/arcsight-channel-client.ts`** — GWT-RPC client for Phoenix services (DataMonitorV2Service, ChannelService, GroupService, ReportService). Separate connection pool (4 connections). Has its own token (Phoenix login returns a different token than REST API). Calls the GWT-RPC codec to build/decode pipe-delimited wire format. The `X-GWT-Permutation` header uses the module permutation hash (`ARCSIGHT_PHOENIX_PERMUTATION`), while per-service serialization policy hashes go in the request body.
 
 3. **`src/lib/arcsight-dispatcher.ts`** — Shared dispatcher factory. Creates an undici `Agent` (direct), `ProxyAgent` (HTTP CONNECT tunnel), or SOCKS5-aware `Agent` based on `ARCSIGHT_PROXY_URL`. Both clients import from here.
 
 4. **`src/lib/gwt-rpc-codec.ts`** — Pure encoder/decoder for GWT-RPC wire protocol. Builds pipe-delimited request payloads and parses `//OK[...]` response arrays. No network calls.
 
-### Customer → Connector Resolution (critical path)
+### Client → Connector Resolution (critical path)
 
-ArcSight has no direct "connectors for customer" API. The code bridges via a 4-step group hierarchy traversal in `getConnectorsForCustomer()`:
+ArcSight has no direct "connectors for client" API. The code bridges via a 4-step group hierarchy traversal in `getConnectorsForClient()`:
 
-1. `customers/{id}/allPathsToRoot` → get parent group IDs
+1. `customers/{id}/allPathsToRoot` → get parent group IDs (ArcSight API uses "customers")
 2. `groups/{groupId}/children` → get child resource IDs (mixed types)
 3. `connectors/ids?ids=...` → fetch as connectors (non-connectors silently ignored)
 4. `connectors/devices` → global device map, slowest call (45s timeout)
 
-Steps 3 and 4 run in parallel via `Promise.all`. A debug endpoint at `/api/arcsight/customers/[id]/debug` runs each step individually with timing data.
+Steps 3 and 4 run in parallel via `Promise.all`. A debug endpoint at `/api/arcsight/clients/[id]/debug` runs each step individually with timing data.
 
 ### Proxy / Split Tunneling
 
@@ -102,25 +103,34 @@ Diagnostic endpoint: `GET /api/arcsight/proxy-status`
 |-------|---------|
 | `/` | Login page |
 | `/dashboard` | Main SOC overview (stats, alerts, activity feed) |
-| `/dashboard/customers` | ArcSight customer list with search |
-| `/dashboard/customers/[id]` | Customer detail + connector management |
-| `/dashboard/channels` | Data Monitor (Phoenix GWT-RPC debug view) |
+| `/dashboard/clients` | ArcSight client list with search |
+| `/dashboard/clients/[id]` | Client detail + connector management |
+| `/dashboard/channels` | Channel monitoring — Client tree view (default) + Canvas view toggle |
+| `/dashboard/devices` | Device browser — client dropdown, connector-grouped device tables |
+| `/dashboard/reports` | Report browser — tree view, run, download archives |
 
 ### API Routes
 
 | Endpoint | Methods | Purpose |
 |----------|---------|---------|
-| `/api/arcsight/customers` | GET | All customers |
-| `/api/arcsight/customers/[id]` | GET | Single customer |
-| `/api/arcsight/customers/[id]/connectors` | GET, POST, DELETE | Customer's connectors + link/unlink |
-| `/api/arcsight/customers/[id]/debug` | GET | Step-by-step connector resolution diagnostic |
+| `/api/arcsight/clients` | GET | All clients |
+| `/api/arcsight/clients/[id]` | GET | Single client |
+| `/api/arcsight/clients/[id]/connectors` | GET, POST, DELETE | Client's connectors + link/unlink |
+| `/api/arcsight/clients/[id]/debug` | GET | Step-by-step connector resolution diagnostic |
 | `/api/arcsight/connectors` | GET | All connectors |
 | `/api/arcsight/connectors/health` | GET | Live/dead connector health |
 | `/api/arcsight/connectors/devices` | GET | Connector device map (graceful degradation) |
 | `/api/arcsight/channels` | GET | Data Monitor viewable data (GWT-RPC) |
 | `/api/arcsight/channels/[groupId]` | GET | Channel group data |
 | `/api/arcsight/channels/list` | GET | All active channel groups + channels (GWT-RPC) |
+| `/api/arcsight/channels/tree` | GET | Client hierarchy tree (`?root=FORTRESS` to filter) |
 | `/api/arcsight/channels/debug` | GET | GWT-RPC diagnostic info |
+| `/api/arcsight/reports` | GET | All reports in tree structure (GWT-RPC) |
+| `/api/arcsight/reports/[id]` | GET | Report definition details |
+| `/api/arcsight/reports/[id]/run` | POST | Trigger ad-hoc report execution |
+| `/api/arcsight/reports/[id]/archives` | GET | List archived report results |
+| `/api/arcsight/reports/[id]/download` | GET | Download report file (PDF/CSV/HTML) |
+| `/api/arcsight/reports/discover` | GET | ReportService GWT-RPC discovery |
 | `/api/arcsight/proxy-status` | GET | Current proxy mode and config |
 
 ## Hooks (`src/hooks/use-arcsight.ts`)
@@ -129,18 +139,24 @@ Generic `useArcsightQuery<T>(url, options?)` pattern — returns `{ data, isLoad
 
 | Hook | Poll Interval | Notes |
 |------|--------------|-------|
-| `useCustomers(search?)` | 30s | Optional search param |
-| `useCustomer(id)` | none | Single customer |
-| `useCustomerConnectors(customerId)` | 30s | Connectors + devices |
+| `useClients(search?)` | 30s | Optional search param |
+| `useClient(id)` | none | Single client |
+| `useClientConnectors(clientId)` | 30s | Connectors + devices |
 | `useConnectorHealth()` | 15s | Live/dead counts |
 | `useConnectorHealthDetailed()` | 30s | Enriched with names |
 | `useAllConnectors(enabled?)` | none | Full connector list |
 | `useActiveChannelEvents(channelId?)` | 10s | Phoenix channel events |
 | `useChannelEventsOnDemand(channelId)` | 10s | Null-safe, on-demand |
 | `useChannelList()` | 60s | All groups + channels |
+| `useClientTree(rootName?)` | 60s | Client hierarchy tree (default root: FORTRESS) |
 | `useChannelDebug()` | none | GWT-RPC diagnostics |
 
-Mutation hooks: `useLinkConnector(customerId, onSuccess?)`, `useUnlinkConnector(customerId, onSuccess?)` — both use `useArcsightMutation` (POST/DELETE).
+Mutation hooks: `useLinkConnector(clientId, onSuccess?)`, `useUnlinkConnector(clientId, onSuccess?)` — both use `useArcsightMutation` (POST/DELETE).
+
+| `useReports()` | 60s | Report tree listing |
+| `useReport(id)` | none | Single report definition |
+| `useReportArchives(id)` | 30s | Archived results for a report |
+| `useRunReport(id)` | — | Mutation hook (POST) |
 
 ## Styling Conventions
 
@@ -154,13 +170,13 @@ Mutation hooks: `useLinkConnector(customerId, onSuccess?)`, `useUnlinkConnector(
 
 ## Code Patterns
 
-- **shadcn/ui** (new-york style, RSC enabled, neutral base, CSS variables) with `@/components/ui/` — add via `npx shadcn@latest add <component>`. `cn()` utility in `src/lib/utils.ts` (clsx + twMerge). Installed: avatar, badge, button, card, chart, dropdown-menu, input, label, separator, sheet, sidebar, skeleton, sonner, table, tabs, tooltip
+- **shadcn/ui** (new-york style, RSC enabled, neutral base, CSS variables) with `@/components/ui/` — add via `npx shadcn@latest add <component>`. `cn()` utility in `src/lib/utils.ts` (clsx + twMerge). Installed: avatar, badge, button, card, chart, dropdown-menu, input, label, select, separator, sheet, sidebar, skeleton, sonner, table, tabs, tooltip
 - Path alias: `@/*` maps to `./src/*`
 - Lucide icons throughout
 - **Tailwind CSS 4**: PostCSS plugin (`@tailwindcss/postcss`), no `tailwind.config.js`. CSS uses `@import "tailwindcss"` + `@theme inline` in `globals.css`. Custom animations: `animate-alive-ping`, `animate-glow-throb` (connector health). Font: Geist Sans + Geist Mono
 - **ESLint 9+** flat config (`eslint.config.mjs`) — extends `next/core-web-vitals` + `next/typescript`
 - Batch size of 50 IDs per bulk ArcSight API call
-- React hooks auto-poll: customers at 30s, connector health at 15s (see Hooks section above)
+- React hooks auto-poll: clients at 30s, connector health at 15s (see Hooks section above)
 - All API route responses set `Cache-Control: no-store`
 - undici dispatcher passed via `// @ts-expect-error` on `fetch()` calls (not in standard RequestInit type)
 

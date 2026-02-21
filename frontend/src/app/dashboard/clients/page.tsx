@@ -33,8 +33,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useCustomers, useConnectorHealth } from "@/hooks/use-arcsight";
-import type { Customer } from "@/types/arcsight";
+import { useClients, useConnectorHealth } from "@/hooks/use-arcsight";
+import type { Client } from "@/types/arcsight";
 
 type SortKey = "name" | "alias" | "location" | "externalID";
 type SortDir = "asc" | "desc";
@@ -50,20 +50,20 @@ function formatLocation(c: {
   return parts.join(", ") || "—";
 }
 
-function getLocationString(c: Customer): string {
+function getLocationString(c: Client): string {
   return formatLocation(c);
 }
 
-function getSortValue(customer: Customer, key: SortKey): string {
+function getSortValue(client: Client, key: SortKey): string {
   switch (key) {
     case "name":
-      return customer.name;
+      return client.name;
     case "alias":
-      return customer.alias ?? "";
+      return client.alias ?? "";
     case "location":
-      return getLocationString(customer);
+      return getLocationString(client);
     case "externalID":
-      return customer.externalID ?? "";
+      return client.externalID ?? "";
   }
 }
 
@@ -86,7 +86,7 @@ function SortIcon({
   );
 }
 
-export default function CustomersPage() {
+export default function ClientsPage() {
   const [searchInput, setSearchInput] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("name");
@@ -107,10 +107,10 @@ export default function CustomersPage() {
     setCurrentPage(1);
   }
 
-  const { data: customers, isLoading, error, refetch } = useCustomers(debouncedSearch);
+  const { data: clients, isLoading, error, refetch } = useClients(debouncedSearch);
   const { data: health } = useConnectorHealth();
 
-  const displayData = useMemo<Customer[]>(() => customers ?? [], [customers]);
+  const displayData = useMemo<Client[]>(() => clients ?? [], [clients]);
 
   // Filter → Sort → Paginate pipeline
   const filtered = useMemo(() => {
@@ -142,7 +142,7 @@ export default function CustomersPage() {
     return sorted.slice(start, start + PAGE_SIZE);
   }, [sorted, currentPage]);
 
-  const customersWithLocation = displayData.filter(
+  const clientsWithLocation = displayData.filter(
     (c) => c.city || c.country
   ).length;
 
@@ -160,14 +160,14 @@ export default function CustomersPage() {
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold">Customers</h2>
-          <p className="text-gray-500">ArcSight ESM customer management</p>
+          <h2 className="text-2xl font-bold">Clients</h2>
+          <p className="text-gray-500">ArcSight ESM client management</p>
         </div>
         <div className="flex items-center gap-3">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
             <Input
-              placeholder="Search customers..."
+              placeholder="Search clients..."
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               className="w-64 pl-10 bg-white/5 border-white/10 text-white placeholder:text-gray-500"
@@ -199,7 +199,7 @@ export default function CustomersPage() {
         <Card className="bg-[#12121a] border-white/10">
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-gray-400">
-              Total Customers
+              Total Clients
             </CardTitle>
             <Building2 className="w-5 h-5 text-blue-500" />
           </CardHeader>
@@ -226,7 +226,7 @@ export default function CustomersPage() {
               <Skeleton className="h-9 w-16 bg-white/10" />
             ) : (
               <div className="text-3xl font-bold text-white">
-                {customersWithLocation}
+                {clientsWithLocation}
               </div>
             )}
           </CardContent>
@@ -251,12 +251,12 @@ export default function CustomersPage() {
         </Card>
       </div>
 
-      {/* Customer Directory */}
+      {/* Client Directory */}
       <Card className="bg-[#12121a] border-white/10">
         <CardHeader>
-          <CardTitle className="text-white">Customer Directory</CardTitle>
+          <CardTitle className="text-white">Client Directory</CardTitle>
           <CardDescription className="text-gray-500">
-            Click a customer to view connectors and devices
+            Click a client to view connectors and devices
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -327,31 +327,31 @@ export default function CustomersPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {paginated.map((customer) => (
+                  {paginated.map((client) => (
                     <TableRow
-                      key={customer.resourceId}
+                      key={client.resourceId}
                       className="border-white/10 hover:bg-white/5"
                     >
                       <TableCell>
                         <Link
-                          href={`/dashboard/customers/${encodeURIComponent(customer.resourceId)}`}
+                          href={`/dashboard/clients/${encodeURIComponent(client.resourceId)}`}
                           className="text-white font-medium hover:text-red-400 transition-colors"
                         >
-                          {customer.name}
+                          {client.name}
                         </Link>
                       </TableCell>
                       <TableCell className="text-gray-400">
-                        {customer.alias || "—"}
+                        {client.alias || "—"}
                       </TableCell>
                       <TableCell className="text-gray-400">
-                        {formatLocation(customer)}
+                        {formatLocation(client)}
                       </TableCell>
                       <TableCell className="font-mono text-sm text-gray-500">
-                        {customer.externalID || "—"}
+                        {client.externalID || "—"}
                       </TableCell>
                       <TableCell>
                         <Link
-                          href={`/dashboard/customers/${encodeURIComponent(customer.resourceId)}`}
+                          href={`/dashboard/clients/${encodeURIComponent(client.resourceId)}`}
                           className="text-gray-500 hover:text-white transition-colors"
                         >
                           <ChevronRight className="w-4 h-4" />
@@ -405,8 +405,8 @@ export default function CustomersPage() {
           ) : (
             <div className="text-center py-12 text-gray-500">
               {debouncedSearch
-                ? `No customers matching "${debouncedSearch}"`
-                : "No customers found"}
+                ? `No clients matching "${debouncedSearch}"`
+                : "No clients found"}
             </div>
           )}
         </CardContent>

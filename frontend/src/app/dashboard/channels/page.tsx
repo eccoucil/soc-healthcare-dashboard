@@ -24,7 +24,9 @@ import {
   useChannelList,
   useChannelEventsOnDemand,
   useChannelScan,
+  useClientTree,
 } from "@/hooks/use-arcsight";
+import { ChevronRight, FolderTree, LayoutGrid, Users } from "lucide-react";
 
 type ActivityFilter = "all" | "active" | "inactive";
 
@@ -669,6 +671,465 @@ function ChannelCanvasView() {
   );
 }
 
+// --- Client Tree View ---
+
+interface ClientNode {
+  name: string;
+  resourceId: string;
+  path: string;
+  channels: ChannelCircleData[];
+  children: ClientNode[];
+}
+
+function countChannels(node: ClientNode): number {
+  let count = node.channels.length;
+  for (const child of node.children) {
+    count += countChannels(child);
+  }
+  return count;
+}
+
+function countActiveChannels(node: ClientNode): number {
+  let count = 0;
+  for (const ch of node.channels) {
+    if (getChannelHealth(ch.lastUpdateTime).status === "healthy") count++;
+  }
+  for (const child of node.children) {
+    count += countActiveChannels(child);
+  }
+  return count;
+}
+
+function getLatestUpdate(node: ClientNode): string | null {
+  let latest: number | null = null;
+  for (const ch of node.channels) {
+    if (ch.lastUpdateTime) {
+      const t = new Date(ch.lastUpdateTime).getTime();
+      if (!isNaN(t) && (latest === null || t > latest)) latest = t;
+    }
+  }
+  for (const child of node.children) {
+    const childLatest = getLatestUpdate(child);
+    if (childLatest) {
+      const t = new Date(childLatest).getTime();
+      if (latest === null || t > latest) latest = t;
+    }
+  }
+  return latest !== null ? new Date(latest).toISOString() : null;
+}
+
+function formatTimeAgo(iso: string | null): string {
+  if (!iso) return "No data";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (isNaN(ms)) return "Unknown";
+  if (ms < 60_000) return "Just now";
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`;
+  return `${Math.floor(ms / 86_400_000)}d ago`;
+}
+
+function ClientCard({
+  node,
+  onSelectChannel,
+}: {
+  node: ClientNode;
+  onSelectChannel: (ch: ChannelCircleData) => void;
+}) {
+  const totalChannels = countChannels(node);
+  const activeChannels = countActiveChannels(node);
+  const inactiveChannels = totalChannels - activeChannels;
+  const latestUpdate = getLatestUpdate(node);
+
+  // If this node is just a pass-through with one child and no channels, skip it
+  if (node.channels.length === 0 && node.children.length === 1) {
+    return (
+      <ClientCard node={node.children[0]} onSelectChannel={onSelectChannel} />
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-white/10 bg-[#12121a] overflow-hidden">
+      {/* Client header */}
+      <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-red-600/20 flex items-center justify-center">
+            <Users className="w-4 h-4 text-red-400" />
+          </div>
+          <div>
+            <h3 className="text-white font-semibold text-sm">{node.name}</h3>
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className="text-[11px] text-gray-500">{totalChannels} channel{totalChannels !== 1 ? "s" : ""}</span>
+              <span className="text-gray-700">&middot;</span>
+              <span className="text-[11px] text-gray-500">Updated {formatTimeAgo(latestUpdate)}</span>
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge
+            variant="outline"
+            className="bg-green-500/10 text-green-400 border-green-500/20 text-[11px] px-2 py-0"
+          >
+            {activeChannels} active
+          </Badge>
+          {inactiveChannels > 0 && (
+            <Badge
+              variant="outline"
+              className="bg-red-500/10 text-red-400 border-red-500/20 text-[11px] px-2 py-0"
+            >
+              {inactiveChannels} inactive
+            </Badge>
+          )}
+        </div>
+      </div>
+
+      {/* Channel circles */}
+      {node.channels.length > 0 && (
+        <div className="px-5 py-4">
+          <div className="flex flex-wrap gap-5">
+            {node.channels.map((ch) => (
+              <ChannelCircle
+                key={ch.resourceId}
+                channel={ch}
+                onClick={() => onSelectChannel(ch)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Sub-groups */}
+      {node.children.length > 0 && (
+        <div className="px-5 pb-4 space-y-3">
+          {node.channels.length > 0 && node.children.length > 0 && (
+            <div className="border-t border-white/5 pt-3" />
+          )}
+          <div className="flex items-center gap-2 text-xs text-gray-500">
+            <FolderTree className="w-3.5 h-3.5" />
+            <span>Sub-groups</span>
+          </div>
+          <div className="space-y-3">
+            {node.children.map((child) => (
+              <SubGroupSection
+                key={child.resourceId || child.name}
+                node={child}
+                onSelectChannel={onSelectChannel}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SubGroupSection({
+  node,
+  onSelectChannel,
+}: {
+  node: ClientNode;
+  onSelectChannel: (ch: ChannelCircleData) => void;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const total = countChannels(node);
+  const active = countActiveChannels(node);
+
+  return (
+    <div className="rounded-lg border border-white/5 bg-[#0e0e18]">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full px-4 py-2.5 flex items-center justify-between text-left hover:bg-white/5 transition-colors rounded-lg"
+      >
+        <div className="flex items-center gap-2">
+          <ChevronRight
+            className={`w-3.5 h-3.5 text-gray-500 transition-transform ${expanded ? "rotate-90" : ""}`}
+          />
+          <span className="text-sm text-gray-300">{node.name}</span>
+          <span className="text-[11px] text-gray-600">
+            {total} channel{total !== 1 ? "s" : ""}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <span className="w-2 h-2 rounded-full bg-green-500" />
+          <span className="text-[11px] text-gray-500">{active}</span>
+          {total - active > 0 && (
+            <>
+              <span className="w-2 h-2 rounded-full bg-red-500 ml-1" />
+              <span className="text-[11px] text-gray-500">{total - active}</span>
+            </>
+          )}
+        </div>
+      </button>
+      {expanded && node.channels.length > 0 && (
+        <div className="px-4 pb-3 pt-1">
+          <div className="flex flex-wrap gap-5">
+            {node.channels.map((ch) => (
+              <ChannelCircle
+                key={ch.resourceId}
+                channel={ch}
+                onClick={() => onSelectChannel(ch)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+      {expanded && node.children.length > 0 && (
+        <div className="px-4 pb-3 space-y-2">
+          {node.children.map((child) => (
+            <SubGroupSection
+              key={child.resourceId || child.name}
+              node={child}
+              onSelectChannel={onSelectChannel}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ClientTreeView() {
+  const { data, isLoading, error, refetch } = useClientTree("FORTRESS");
+  const [selectedChannel, setSelectedChannel] = useState<ChannelCircleData | null>(null);
+  const [filter, setFilter] = useState<ActivityFilter>("all");
+
+  // Flatten all channels from the tree for counting
+  const allChannels = useMemo(() => {
+    if (!data) return [];
+    const channels: ChannelCircleData[] = [];
+    function collect(node: ClientNode) {
+      for (const ch of node.channels) {
+        channels.push(ch);
+      }
+      for (const child of node.children) collect(child);
+    }
+    collect(data);
+    return channels;
+  }, [data]);
+
+  const { active: activeCount, inactive: inactiveCount } = useMemo(() => {
+    let active = 0;
+    for (const ch of allChannels) {
+      if (getChannelHealth(ch.lastUpdateTime).status === "healthy") active++;
+    }
+    return { active, inactive: allChannels.length - active };
+  }, [allChannels]);
+
+  // Filter the tree by activity status
+  const filteredTree = useMemo(() => {
+    if (!data || filter === "all") return data;
+
+    function filterNode(node: ClientNode): ClientNode | null {
+      const filteredChannels = node.channels.filter((ch) => {
+        const { status } = getChannelHealth(ch.lastUpdateTime);
+        return filter === "active" ? status === "healthy" : status === "unhealthy";
+      });
+      const filteredChildren = node.children
+        .map((child) => filterNode(child))
+        .filter((c): c is ClientNode => c !== null);
+
+      if (filteredChannels.length === 0 && filteredChildren.length === 0) return null;
+      return { ...node, channels: filteredChannels, children: filteredChildren };
+    }
+
+    return filterNode(data);
+  }, [data, filter]);
+
+  // Get the "category" nodes (Device Monitoring, Incident Monitoring, etc.)
+  const categoryNodes = useMemo(() => {
+    if (!filteredTree) return [];
+    // If root has children, those are the categories
+    if (filteredTree.children.length > 0) return filteredTree.children;
+    // Otherwise the root itself is a category
+    return [filteredTree];
+  }, [filteredTree]);
+
+  return (
+    <>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <h2 className="text-2xl font-bold">Channels</h2>
+          {data && (
+            <Badge
+              variant="outline"
+              className="bg-blue-500/15 text-blue-400 border-blue-500/20"
+            >
+              {allChannels.length} total
+            </Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 p-1 bg-[#12121a] rounded-lg border border-white/10">
+            <button
+              onClick={() => setFilter("all")}
+              className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                filter === "all"
+                  ? "bg-white/10 text-white"
+                  : "text-gray-400 hover:text-white hover:bg-white/5"
+              }`}
+            >
+              All
+            </button>
+            <button
+              onClick={() => setFilter("active")}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                filter === "active"
+                  ? "bg-green-500/20 text-green-400"
+                  : "text-gray-400 hover:text-white hover:bg-white/5"
+              }`}
+            >
+              <span className="w-2 h-2 rounded-full bg-green-500" />
+              Active ({activeCount})
+            </button>
+            <button
+              onClick={() => setFilter("inactive")}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                filter === "inactive"
+                  ? "bg-red-500/20 text-red-400"
+                  : "text-gray-400 hover:text-white hover:bg-white/5"
+              }`}
+            >
+              <span className="w-2 h-2 rounded-full bg-red-500" />
+              Inactive ({inactiveCount})
+            </button>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={refetch}
+            className="text-gray-400 hover:text-white"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </Button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="flex flex-col items-center gap-3 px-4 py-6 rounded-lg bg-red-500/10 border border-red-500/20">
+          <Activity className="w-6 h-6 text-red-400" />
+          <p className="text-sm text-red-300 text-center max-w-md">{error}</p>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={refetch}
+            className="text-gray-400 hover:text-white gap-1.5 mt-1"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {isLoading ? (
+        <div className="space-y-4">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <div key={i} className="rounded-xl border border-white/10 bg-[#12121a] p-5">
+              <div className="flex items-center gap-3 mb-4">
+                <Skeleton className="w-9 h-9 rounded-lg bg-white/10" />
+                <div className="space-y-2">
+                  <Skeleton className="h-4 w-32 bg-white/10" />
+                  <Skeleton className="h-3 w-48 bg-white/10" />
+                </div>
+              </div>
+              <div className="flex gap-5">
+                {Array.from({ length: 4 }).map((_, j) => (
+                  <div key={j} className="flex flex-col items-center gap-2">
+                    <Skeleton className="w-20 h-20 rounded-full bg-white/10" />
+                    <Skeleton className="h-3 w-16 bg-white/10" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : categoryNodes.length > 0 ? (
+        <div className="space-y-6">
+          {categoryNodes.map((category) => (
+            <div key={category.resourceId || category.name}>
+              {/* Category header */}
+              <div className="flex items-center gap-2 mb-3">
+                <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
+                  {category.name}
+                </h3>
+                <div className="flex-1 h-px bg-white/5" />
+              </div>
+
+              {/* Client cards within this category */}
+              {category.children.length > 0 ? (
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  {category.children.map((client) => (
+                    <ClientCard
+                      key={client.resourceId || client.name}
+                      node={client}
+                      onSelectChannel={setSelectedChannel}
+                    />
+                  ))}
+                </div>
+              ) : category.channels.length > 0 ? (
+                <ClientCard
+                  node={category}
+                  onSelectChannel={setSelectedChannel}
+                />
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : !error ? (
+        <div className="text-center py-12">
+          <Users className="w-10 h-10 text-gray-600 mx-auto mb-3" />
+          <p className="text-gray-500">
+            {filter !== "all"
+              ? `No ${filter} channels — try switching to "All"`
+              : "No client data found"}
+          </p>
+        </div>
+      ) : null}
+
+      <p className="text-xs text-gray-600 text-center">
+        Client tree refreshes every 60s
+      </p>
+
+      <ChannelEventSheet
+        channel={selectedChannel}
+        onClose={() => setSelectedChannel(null)}
+      />
+    </>
+  );
+}
+
+type ViewMode = "clients" | "canvas";
+
 export default function ChannelsPage() {
-  return <ChannelCanvasView />;
+  const [view, setView] = useState<ViewMode>("clients");
+
+  return (
+    <>
+      {/* View toggle */}
+      <div className="flex items-center gap-1 p-1 bg-[#12121a] rounded-lg border border-white/10 w-fit">
+        <button
+          onClick={() => setView("clients")}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+            view === "clients"
+              ? "bg-red-600/20 text-red-400"
+              : "text-gray-400 hover:text-white hover:bg-white/5"
+          }`}
+        >
+          <Users className="w-3.5 h-3.5" />
+          Clients
+        </button>
+        <button
+          onClick={() => setView("canvas")}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+            view === "canvas"
+              ? "bg-blue-600/20 text-blue-400"
+              : "text-gray-400 hover:text-white hover:bg-white/5"
+          }`}
+        >
+          <LayoutGrid className="w-3.5 h-3.5" />
+          Canvas
+        </button>
+      </div>
+
+      {view === "clients" ? <ClientTreeView /> : <ChannelCanvasView />}
+    </>
+  );
 }

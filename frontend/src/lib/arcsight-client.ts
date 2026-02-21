@@ -4,7 +4,7 @@ import {
   getProxyInfo,
 } from "@/lib/arcsight-dispatcher";
 import type {
-  Customer,
+  Client,
   Connector,
   ConnectorDeviceMap,
   ConnectorWithDevices,
@@ -187,22 +187,22 @@ async function arcsightPost(
   }
 }
 
-// --- Customer methods ---
+// --- Client methods (ArcSight "Customer" resources) ---
 
-export async function getAllCustomerIds(): Promise<string[]> {
+export async function getAllClientIds(): Promise<string[]> {
   return arcsightFetch<string[]>("/v1/customers/allIds", 60);
 }
 
-export async function getCustomersByIds(ids: string[]): Promise<Customer[]> {
+export async function getClientsByIds(ids: string[]): Promise<Client[]> {
   const params = ids.map((id) => `ids=${encodeURIComponent(id)}`).join("&");
-  return arcsightFetch<Customer[]>(`/v1/customers/ids?${params}`, 60);
+  return arcsightFetch<Client[]>(`/v1/customers/ids?${params}`, 60);
 }
 
-export async function getCustomerById(id: string): Promise<Customer> {
-  return arcsightFetch<Customer>(`/v1/customers/${encodeURIComponent(id)}`);
+export async function getClientById(id: string): Promise<Client> {
+  return arcsightFetch<Client>(`/v1/customers/${encodeURIComponent(id)}`);
 }
 
-export async function getCustomerPathsToRoot(id: string): Promise<string[]> {
+export async function getClientPathsToRoot(id: string): Promise<string[]> {
   return arcsightFetch<string[]>(
     `/v1/customers/${encodeURIComponent(id)}/allPathsToRoot`
   );
@@ -260,32 +260,32 @@ export async function getAllConnectors(): Promise<Connector[]> {
   return all;
 }
 
-// --- Connector-customer linking methods ---
+// --- Connector-client linking methods ---
 
-async function getCustomerParentGroupId(customerId: string): Promise<string> {
-  const paths = await getCustomerPathsToRoot(customerId);
+async function getClientParentGroupId(clientId: string): Promise<string> {
+  const paths = await getClientPathsToRoot(clientId);
   if (paths.length === 0) {
-    throw new Error("Customer has no parent group");
+    throw new Error("Client has no parent group");
   }
   return paths[0];
 }
 
-export async function linkConnectorsToCustomer(
-  customerId: string,
+export async function linkConnectorsToClient(
+  clientId: string,
   connectorIds: string[]
 ): Promise<void> {
-  const groupId = await getCustomerParentGroupId(customerId);
+  const groupId = await getClientParentGroupId(clientId);
   await arcsightPost(
     `/v1/groups/${encodeURIComponent(groupId)}/children`,
     connectorIds
   );
 }
 
-export async function unlinkConnectorsFromCustomer(
-  customerId: string,
+export async function unlinkConnectorsFromClient(
+  clientId: string,
   connectorIds: string[]
 ): Promise<void> {
-  const groupId = await getCustomerParentGroupId(customerId);
+  const groupId = await getClientParentGroupId(clientId);
   await arcsightPost(
     `/v1/groups/${encodeURIComponent(groupId)}/removeChildren`,
     connectorIds
@@ -295,21 +295,21 @@ export async function unlinkConnectorsFromCustomer(
 // --- Composite methods ---
 
 /**
- * Get connectors (with devices) associated with a customer.
+ * Get connectors (with devices) associated with a client.
  *
- * ArcSight has no direct "devices per customer" endpoint. We bridge this
+ * ArcSight has no direct "devices per client" endpoint. We bridge this
  * by traversing the group hierarchy:
- *   1. Get group paths for the customer
+ *   1. Get group paths for the client
  *   2. Get children of the immediate parent group
  *   3. Fetch those children as connectors
  *   4. Attach device details from the connector-devices map
  */
-export async function getConnectorsForCustomer(
-  customerId: string
+export async function getConnectorsForClient(
+  clientId: string
 ): Promise<ConnectorWithDevices[]> {
-  const tag = `[getConnectorsForCustomer ${customerId}]`;
+  const tag = `[getConnectorsForClient ${clientId}]`;
 
-  const paths = await getCustomerPathsToRoot(customerId);
+  const paths = await getClientPathsToRoot(clientId);
   console.log(`${tag} Step 1 — allPathsToRoot: ${JSON.stringify(paths)}`);
 
   if (paths.length === 0) {
@@ -317,10 +317,10 @@ export async function getConnectorsForCustomer(
     return [];
   }
 
-  // paths[0] is slash-delimited: "root/.../parentGroup/customer"
+  // paths[0] is slash-delimited: "root/.../parentGroup/client"
   const segments = paths[0].split("/");
   if (segments.length < 2) {
-    console.log(`${tag} Customer is at root level — no parent group`);
+    console.log(`${tag} Client is at root level — no parent group`);
     return [];
   }
   const parentGroupId = segments[segments.length - 2];
@@ -401,9 +401,9 @@ export async function getConnectorHealthDetailed(): Promise<ConnectorHealthEnric
   };
 }
 
-/** Get all customers, optionally filtered by search term */
-export async function getAllCustomers(search?: string): Promise<Customer[]> {
-  const ids = await getAllCustomerIds();
+/** Get all clients, optionally filtered by search term */
+export async function getAllClients(search?: string): Promise<Client[]> {
+  const ids = await getAllClientIds();
 
   if (ids.length === 0) {
     return [];
@@ -411,15 +411,15 @@ export async function getAllCustomers(search?: string): Promise<Customer[]> {
 
   // Batch fetch sequentially to avoid saturating the ESM connection pool
   const batchSize = 50;
-  let customers: Customer[] = [];
+  let clients: Client[] = [];
   for (let i = 0; i < ids.length; i += batchSize) {
-    const batch = await getCustomersByIds(ids.slice(i, i + batchSize));
-    customers.push(...batch);
+    const batch = await getClientsByIds(ids.slice(i, i + batchSize));
+    clients.push(...batch);
   }
 
   if (search) {
     const term = search.toLowerCase();
-    customers = customers.filter(
+    clients = clients.filter(
       (c) =>
         c.name?.toLowerCase().includes(term) ||
         c.alias?.toLowerCase().includes(term) ||
@@ -429,7 +429,7 @@ export async function getAllCustomers(search?: string): Promise<Customer[]> {
     );
   }
 
-  return customers;
+  return clients;
 }
 
 // --- Events methods ---

@@ -1986,6 +1986,97 @@ export async function getAllActiveChannels(
   }
 }
 
+// --- Client Tree: restructure flat groups into a hierarchy ---
+
+export interface ClientNode {
+  name: string;
+  resourceId: string;
+  path: string;
+  channels: ActiveChannel[];
+  children: ClientNode[];
+}
+
+/**
+ * Build a tree from the flat `ChannelGroupWithChannels[]` returned by `getAllActiveChannels()`.
+ *
+ * Each group's `path` encodes its position in the tree, e.g.:
+ *   /All Active Channels/FORTRESS/Device Monitoring/SAMEE
+ *
+ * We parse every path, insert intermediate nodes as needed, and attach
+ * channels to the deepest matching node.
+ *
+ * @param rootFilter — If provided, only return the subtree whose root matches this name (e.g. "FORTRESS").
+ */
+export function buildClientTree(
+  groups: ChannelGroupWithChannels[],
+  rootFilter?: string
+): ClientNode {
+  // Virtual root collects everything
+  const root: ClientNode = {
+    name: "Root",
+    resourceId: "",
+    path: "/",
+    channels: [],
+    children: [],
+  };
+
+  for (const group of groups) {
+    // Parse path segments, e.g. ["All Active Channels", "FORTRESS", "Device Monitoring", "SAMEE"]
+    const segments = group.path.split("/").filter(Boolean);
+
+    let current = root;
+    let builtPath = "";
+
+    for (const seg of segments) {
+      builtPath += "/" + seg;
+      let child = current.children.find((c) => c.name === seg);
+      if (!child) {
+        child = {
+          name: seg,
+          resourceId: "",
+          path: builtPath,
+          channels: [],
+          children: [],
+        };
+        current.children.push(child);
+      }
+      current = child;
+    }
+
+    // Attach data from the actual group to this node
+    current.resourceId = group.resourceId;
+    current.channels = group.channels;
+  }
+
+  // If rootFilter is provided, find and return that subtree
+  if (rootFilter) {
+    const found = findNode(root, rootFilter);
+    if (found) return found;
+  }
+
+  // Default: return the single top-level child if there's exactly one, otherwise root
+  return root.children.length === 1 ? root.children[0] : root;
+}
+
+function findNode(node: ClientNode, name: string): ClientNode | null {
+  if (node.name === name) return node;
+  for (const child of node.children) {
+    const found = findNode(child, name);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
+ * Fetch all channels and restructure into a client tree.
+ */
+export async function getClientTree(
+  rootFilter?: string
+): Promise<ClientNode> {
+  const { groups } = await getAllActiveChannels();
+  return buildClientTree(groups, rootFilter);
+}
+
 // --- Phase 1: Discover ChannelService methods ---
 
 interface DiscoveredMethod {
@@ -2515,6 +2606,931 @@ export async function scanAllChannelEventsWithSubscription(
       clearPhoenixToken();
       clearSubscriptions();
       return scanAllChannelEventsWithSubscription(true);
+    }
+    throw error;
+  }
+}
+
+// ===========================================================================
+// ReportService — GWT-RPC integration for ArcSight Reports
+// ===========================================================================
+
+// ReportService strong name — auto-discovered or set via env var
+const REPORT_STRONG_NAME =
+  process.env.ARCSIGHT_REPORT_STRONG_NAME ?? "";
+
+// --- Report types ---
+
+export interface ReportGroup {
+  name: string;
+  resourceId: string;
+  path: string;
+  description: string | null;
+}
+
+export interface ReportDefinition {
+  resourceId: string;
+  name: string;
+  path: string;
+  description: string | null;
+  reportType: string | null;
+  createdTimestamp: string | null;
+  modifiedTimestamp: string | null;
+}
+
+export interface ArchivedReport {
+  archiveId: string;
+  reportName: string;
+  generatedAt: string;
+  format: string | null;
+  status: string | null;
+}
+
+export interface ReportTreeGroup {
+  name: string;
+  resourceId: string;
+  path: string;
+  description: string | null;
+  reports: ReportDefinition[];
+}
+
+// --- ReportService discovery ---
+
+interface ReportDiscoverResult {
+  methods: DiscoveredMethod[];
+  strongNameCandidates: string[];
+  serializationPolicy: {
+    url: string;
+    types: string[];
+    error?: string;
+  };
+  cacheJs: {
+    url: string;
+    sizeBytes: number;
+    reportServiceMethods: string[];
+    error?: string;
+  };
+}
+
+/**
+ * Discover ReportService methods and strong name from the GWT compiled JS.
+ *
+ * Scans the cache.js permutation file for ReportService references and
+ * extracts method names + serialization policy hash candidates.
+ */
+export async function discoverReportService(): Promise<ReportDiscoverResult> {
+  if (!PHOENIX_URL) {
+    throw new Error("Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local");
+  }
+
+  const cacheJsUrl = `${MODULE_BASE}${PHOENIX_PERMUTATION}.cache.js`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+
+  let cacheJsResult: ReportDiscoverResult["cacheJs"];
+  let policyResult: ReportDiscoverResult["serializationPolicy"] = {
+    url: "",
+    types: [],
+  };
+  const strongNameCandidates: string[] = [];
+
+  try {
+    const cacheJsRes = await fetch(cacheJsUrl, {
+      signal: controller.signal,
+      // @ts-expect-error -- undici dispatcher
+      dispatcher: phoenixDispatcher,
+    });
+
+    if (!cacheJsRes.ok) {
+      throw new Error(`Failed to fetch cache.js: HTTP ${cacheJsRes.status}`);
+    }
+
+    const jsText = await cacheJsRes.text();
+
+    // --- Extract ReportService methods ---
+    const reportServiceMethods: string[] = [];
+    const allMethodNames = new Set<string>();
+
+    // Find all blocks mentioning ReportService
+    const rsBlocks: string[] = [];
+    const rsPattern = /ReportService/g;
+    let rsMatch;
+    while ((rsMatch = rsPattern.exec(jsText)) !== null) {
+      const start = Math.max(0, rsMatch.index - 2000);
+      const end = Math.min(jsText.length, rsMatch.index + 2000);
+      rsBlocks.push(jsText.slice(start, end));
+    }
+
+    const jsKeywords = new Set([
+      "function", "return", "string", "number", "object", "prototype",
+      "undefined", "boolean", "length", "apply", "call", "bind",
+      "constructor", "toString", "valueOf", "hasOwnProperty",
+      "null", "true", "false", "this", "class", "extends",
+    ]);
+
+    const methodPattern = /["'](\w+)["']/g;
+    for (const block of rsBlocks) {
+      let m;
+      while ((m = methodPattern.exec(block)) !== null) {
+        const name = m[1];
+        if (
+          name.length > 3 &&
+          name.length < 60 &&
+          /^[a-z][a-zA-Z0-9]*$/.test(name) &&
+          !jsKeywords.has(name)
+        ) {
+          allMethodNames.add(name);
+        }
+      }
+    }
+
+    // Also search for RPC proxy patterns
+    const rpcProxyPattern =
+      /(?:ReportService|reportService)[^;]*?["'](\w+)["']/gi;
+    let rpcMatch;
+    while ((rpcMatch = rpcProxyPattern.exec(jsText)) !== null) {
+      const name = rpcMatch[1];
+      if (/^[a-z][a-zA-Z0-9]{3,}$/.test(name)) {
+        allMethodNames.add(name);
+      }
+    }
+
+    reportServiceMethods.push(...allMethodNames);
+
+    // --- Extract strong name candidates ---
+    for (const block of rsBlocks) {
+      const hashPattern = /[A-F0-9]{32}/g;
+      let hm;
+      while ((hm = hashPattern.exec(block)) !== null) {
+        const hash = hm[0];
+        if (hash !== PHOENIX_PERMUTATION && !strongNameCandidates.includes(hash)) {
+          strongNameCandidates.push(hash);
+        }
+      }
+    }
+
+    cacheJsResult = {
+      url: cacheJsUrl,
+      sizeBytes: jsText.length,
+      reportServiceMethods: reportServiceMethods.sort(),
+    };
+
+    // --- Try to fetch serialization policy for first candidate ---
+    if (strongNameCandidates.length > 0) {
+      const candidateHash = strongNameCandidates[0];
+      const rpcPolicyUrl = `${MODULE_BASE}${candidateHash}.gwt.rpc`;
+      try {
+        const policyRes = await fetch(rpcPolicyUrl, {
+          signal: controller.signal,
+          // @ts-expect-error -- undici dispatcher
+          dispatcher: phoenixDispatcher,
+        });
+
+        if (policyRes.ok) {
+          const policyText = await policyRes.text();
+          const types: string[] = [];
+          for (const line of policyText.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("@")) continue;
+            const parts = trimmed.split(",").map((s) => s.trim());
+            if (parts.length >= 4 && parts[3]?.includes(".")) {
+              types.push(parts[3]);
+            }
+            if (parts.length >= 1 && parts[0].includes("arcsight")) {
+              types.push(parts[0]);
+            }
+          }
+          policyResult = {
+            url: rpcPolicyUrl,
+            types: [...new Set(types)].sort(),
+          };
+        } else {
+          policyResult = {
+            url: rpcPolicyUrl,
+            types: [],
+            error: `HTTP ${policyRes.status}`,
+          };
+        }
+      } catch (err) {
+        policyResult = {
+          url: rpcPolicyUrl,
+          types: [],
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const knownMethods: DiscoveredMethod[] = [
+    { name: "findAllIds", context: "Expected — list all report IDs" },
+    { name: "getResourceById", context: "Expected — fetch report definition by ID" },
+    { name: "getArchivedReports", context: "Expected — list archived report results" },
+    { name: "runReport", context: "Expected — trigger ad-hoc report execution" },
+    { name: "getGroupChildrenResourcesWithRequest", context: "Expected — browse report groups (via GroupService)" },
+  ];
+
+  for (const name of cacheJsResult.reportServiceMethods) {
+    if (!knownMethods.some((m) => m.name === name)) {
+      knownMethods.push({
+        name,
+        context: "Discovered in compiled GWT JS near ReportService references",
+      });
+    }
+  }
+
+  return {
+    methods: knownMethods,
+    strongNameCandidates,
+    serializationPolicy: policyResult,
+    cacheJs: cacheJsResult,
+  };
+}
+
+// --- ReportService GWT-RPC calls ---
+
+function getReportStrongName(): string {
+  if (!REPORT_STRONG_NAME) {
+    console.warn(
+      "[report-service] ARCSIGHT_REPORT_STRONG_NAME not set. " +
+      "Run /api/arcsight/reports/discover to find it, then set the env var."
+    );
+  }
+  return REPORT_STRONG_NAME;
+}
+
+/**
+ * Call GroupService.getRootGroupsForResourceType(token, ResourceType=Report).
+ * ResourceType ordinal 4 = Report.
+ */
+async function callGetReportRootGroups(
+  token: string
+): Promise<GwtRpcDecodedResponse> {
+  if (!PHOENIX_URL) {
+    throw new Error("Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local");
+  }
+
+  const config: GwtRpcServiceConfig = {
+    serviceInterface:
+      "com.arcsight.product.esmclient.service.v1.client.gwt.api.GroupService",
+    method: "getRootGroupsForResourceType",
+    moduleBaseUrl: MODULE_BASE,
+    strongName: GROUP_STRONG_NAME,
+  };
+
+  const params: GwtRpcParam[] = [
+    { kind: "string", value: token },
+    {
+      kind: "enum",
+      typeDescriptor:
+        "com.arcsight.product.esmclient.service.v1.model.resource.ResourceType/2290386171",
+      ordinal: 4, // Report
+    },
+  ];
+
+  const requestBody = buildGwtRpcRequest(config, params);
+  const serviceUrl = `${PHOENIX_URL}/www/esmclient-service/gwt/GroupService`;
+  return phoenixRpc(serviceUrl, requestBody);
+}
+
+/**
+ * Call GroupService.getGroupChildrenResourcesWithRequest for report groups.
+ */
+async function callGetReportGroupChildren(
+  token: string,
+  groupResourceId: string,
+  groupPath: string
+): Promise<GwtRpcDecodedResponse> {
+  if (!PHOENIX_URL) {
+    throw new Error("Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local");
+  }
+
+  const config: GwtRpcServiceConfig = {
+    serviceInterface:
+      "com.arcsight.product.esmclient.service.v1.client.gwt.api.GroupService",
+    method: "getGroupChildrenResourcesWithRequest",
+    moduleBaseUrl: MODULE_BASE,
+    strongName: GROUP_STRONG_NAME,
+  };
+
+  const params: GwtRpcParam[] = [
+    { kind: "string", value: token },
+    {
+      kind: "object",
+      typeDescriptor:
+        "com.arcsight.product.esmclient.service.v1.model.resource.ResourceReference/2894737980",
+      fields: [
+        { kind: "string", value: groupResourceId },
+        { kind: "string", value: null },
+        {
+          kind: "enum",
+          typeDescriptor:
+            "com.arcsight.product.esmclient.service.v1.model.resource.ResourceType/2290386171",
+          ordinal: 0, // Group
+        },
+        { kind: "string", value: groupPath },
+      ],
+    },
+    {
+      kind: "object",
+      typeDescriptor:
+        "com.arcsight.product.esmclient.service.v1.model.paging.PagingListRequest/2455014551",
+      fields: [
+        { kind: "int", value: 200 },
+        {
+          kind: "list",
+          typeDescriptor: "java.util.ArrayList/4159755760",
+          items: [
+            {
+              kind: "object",
+              typeDescriptor:
+                "com.arcsight.product.esmclient.service.v1.model.sorting.SortInfo/776413725",
+              fields: [
+                { kind: "string", value: "resource:display_name" },
+                {
+                  kind: "enum",
+                  typeDescriptor:
+                    "com.arcsight.product.esmclient.service.v1.model.sorting.SortOrder/1726127846",
+                  ordinal: 0, // ASC
+                },
+              ],
+            },
+          ],
+        },
+        { kind: "int", value: 0 },
+      ],
+    },
+  ];
+
+  const requestBody = buildGwtRpcRequest(config, params);
+  const serviceUrl = `${PHOENIX_URL}/www/esmclient-service/gwt/GroupService`;
+  return phoenixRpc(serviceUrl, requestBody);
+}
+
+async function callGetReportById(
+  token: string,
+  reportId: string
+): Promise<GwtRpcDecodedResponse> {
+  if (!PHOENIX_URL) {
+    throw new Error("Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local");
+  }
+
+  const strongName = getReportStrongName();
+  if (!strongName) {
+    throw new Error(
+      "ReportService strong name not configured. Set ARCSIGHT_REPORT_STRONG_NAME or run discovery."
+    );
+  }
+
+  const config: GwtRpcServiceConfig = {
+    serviceInterface:
+      "com.arcsight.product.esmclient.service.v1.client.gwt.api.ReportService",
+    method: "getResourceById",
+    moduleBaseUrl: MODULE_BASE,
+    strongName,
+  };
+
+  const params: GwtRpcParam[] = [
+    { kind: "string", value: token },
+    { kind: "string", value: reportId },
+  ];
+
+  const requestBody = buildGwtRpcRequest(config, params);
+  const serviceUrl = `${PHOENIX_URL}/www/esmclient-service/gwt/ReportService`;
+  return phoenixRpc(serviceUrl, requestBody);
+}
+
+async function callFindAllReportIds(
+  token: string
+): Promise<GwtRpcDecodedResponse> {
+  if (!PHOENIX_URL) {
+    throw new Error("Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local");
+  }
+
+  const strongName = getReportStrongName();
+  if (!strongName) {
+    throw new Error(
+      "ReportService strong name not configured. Set ARCSIGHT_REPORT_STRONG_NAME or run discovery."
+    );
+  }
+
+  const config: GwtRpcServiceConfig = {
+    serviceInterface:
+      "com.arcsight.product.esmclient.service.v1.client.gwt.api.ReportService",
+    method: "findAllIds",
+    moduleBaseUrl: MODULE_BASE,
+    strongName,
+  };
+
+  const params: GwtRpcParam[] = [
+    { kind: "string", value: token },
+  ];
+
+  const requestBody = buildGwtRpcRequest(config, params);
+  const serviceUrl = `${PHOENIX_URL}/www/esmclient-service/gwt/ReportService`;
+  return phoenixRpc(serviceUrl, requestBody);
+}
+
+async function callRunReport(
+  token: string,
+  reportId: string
+): Promise<GwtRpcDecodedResponse> {
+  if (!PHOENIX_URL) {
+    throw new Error("Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local");
+  }
+
+  const strongName = getReportStrongName();
+  if (!strongName) {
+    throw new Error(
+      "ReportService strong name not configured. Set ARCSIGHT_REPORT_STRONG_NAME or run discovery."
+    );
+  }
+
+  const config: GwtRpcServiceConfig = {
+    serviceInterface:
+      "com.arcsight.product.esmclient.service.v1.client.gwt.api.ReportService",
+    method: "runReport",
+    moduleBaseUrl: MODULE_BASE,
+    strongName,
+  };
+
+  const params: GwtRpcParam[] = [
+    { kind: "string", value: token },
+    { kind: "string", value: reportId },
+  ];
+
+  const requestBody = buildGwtRpcRequest(config, params);
+  const serviceUrl = `${PHOENIX_URL}/www/esmclient-service/gwt/ReportService`;
+  return phoenixRpc(serviceUrl, requestBody);
+}
+
+async function callGetArchivedReports(
+  token: string,
+  reportId: string
+): Promise<GwtRpcDecodedResponse> {
+  if (!PHOENIX_URL) {
+    throw new Error("Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local");
+  }
+
+  const strongName = getReportStrongName();
+  if (!strongName) {
+    throw new Error(
+      "ReportService strong name not configured. Set ARCSIGHT_REPORT_STRONG_NAME or run discovery."
+    );
+  }
+
+  const config: GwtRpcServiceConfig = {
+    serviceInterface:
+      "com.arcsight.product.esmclient.service.v1.client.gwt.api.ReportService",
+    method: "getArchivedReports",
+    moduleBaseUrl: MODULE_BASE,
+    strongName,
+  };
+
+  const params: GwtRpcParam[] = [
+    { kind: "string", value: token },
+    { kind: "string", value: reportId },
+  ];
+
+  const requestBody = buildGwtRpcRequest(config, params);
+  const serviceUrl = `${PHOENIX_URL}/www/esmclient-service/gwt/ReportService`;
+  return phoenixRpc(serviceUrl, requestBody);
+}
+
+async function callDownloadReport(
+  token: string,
+  archiveId: string
+): Promise<GwtRpcDecodedResponse> {
+  if (!PHOENIX_URL) {
+    throw new Error("Phoenix not configured. Set ARCSIGHT_PHOENIX_URL in .env.local");
+  }
+
+  const strongName = getReportStrongName();
+  if (!strongName) {
+    throw new Error(
+      "ReportService strong name not configured. Set ARCSIGHT_REPORT_STRONG_NAME or run discovery."
+    );
+  }
+
+  const config: GwtRpcServiceConfig = {
+    serviceInterface:
+      "com.arcsight.product.esmclient.service.v1.client.gwt.api.ReportService",
+    method: "downloadReport",
+    moduleBaseUrl: MODULE_BASE,
+    strongName,
+  };
+
+  const params: GwtRpcParam[] = [
+    { kind: "string", value: token },
+    { kind: "string", value: archiveId },
+  ];
+
+  const requestBody = buildGwtRpcRequest(config, params);
+  const serviceUrl = `${PHOENIX_URL}/www/esmclient-service/gwt/ReportService`;
+  return phoenixRpc(serviceUrl, requestBody);
+}
+
+// --- Report response parsers ---
+
+function parseReportGroupResponse(decoded: GwtRpcDecodedResponse): ReportGroup[] {
+  const channelGroups = parseGroupResponse(decoded);
+  return channelGroups.map((g) => ({
+    name: g.name,
+    resourceId: g.resourceId,
+    path: g.path,
+    description: g.description,
+  }));
+}
+
+function parseReportListResponse(
+  decoded: GwtRpcDecodedResponse,
+  groupPath?: string
+): ReportDefinition[] {
+  const { stringTable } = decoded;
+  if (stringTable.length === 0) return [];
+
+  const typeDescPattern = /^[\w.$]+\/\d+$/;
+  const isTypeDesc = stringTable.map((s) => typeDescPattern.test(s));
+
+  function isResourceId(s: string): boolean {
+    if (s.length < 10) return false;
+    if (/^[\w+/=-]{10,}={1,2}$/.test(s)) return true;
+    if (/^\d{10,}$/.test(s)) return true;
+    return false;
+  }
+
+  function isTimestamp(s: string): boolean {
+    return /^\d{13}$/.test(s) || /^\d{4}-\d{2}-\d{2}/.test(s);
+  }
+
+  const reports: ReportDefinition[] = [];
+
+  for (let i = 0; i < stringTable.length; i++) {
+    if (isTypeDesc[i]) continue;
+    const path = stringTable[i];
+    if (!path.startsWith("/")) continue;
+    if (groupPath && path === groupPath) continue;
+
+    const segments = path.split("/").filter(Boolean);
+    const name = segments.pop() ?? "";
+    if (!name) continue;
+
+    let resourceId = "";
+    for (let j = i - 1; j >= 0; j--) {
+      if (isTypeDesc[j]) continue;
+      const s = stringTable[j];
+      if (s.startsWith("/")) break;
+      if (isResourceId(s)) {
+        resourceId = s;
+        break;
+      }
+    }
+
+    if (!resourceId) continue;
+
+    let description: string | null = null;
+    let createdTimestamp: string | null = null;
+    let modifiedTimestamp: string | null = null;
+    const timestamps: string[] = [];
+
+    for (let j = i - 1; j >= Math.max(0, i - 10); j--) {
+      if (isTypeDesc[j]) continue;
+      const s = stringTable[j];
+      if (s.startsWith("/")) break;
+      if (isTimestamp(s)) {
+        timestamps.push(s);
+      } else if (
+        s.length > 15 &&
+        !isResourceId(s) &&
+        s !== name &&
+        !description
+      ) {
+        description = s;
+      }
+    }
+
+    if (timestamps.length >= 2) {
+      createdTimestamp = timestamps[1];
+      modifiedTimestamp = timestamps[0];
+    } else if (timestamps.length === 1) {
+      modifiedTimestamp = timestamps[0];
+    }
+
+    reports.push({
+      resourceId,
+      name,
+      path,
+      description,
+      reportType: null,
+      createdTimestamp,
+      modifiedTimestamp,
+    });
+  }
+
+  return reports;
+}
+
+function parseReportDetail(decoded: GwtRpcDecodedResponse): ReportDefinition | null {
+  const { stringTable } = decoded;
+  if (stringTable.length === 0) return null;
+
+  const typeDescPattern = /^[\w.$]+\/\d+$/;
+
+  function isResourceId(s: string): boolean {
+    if (s.length < 10) return false;
+    if (/^[\w+/=-]{10,}={1,2}$/.test(s)) return true;
+    if (/^\d{10,}$/.test(s)) return true;
+    return false;
+  }
+
+  let resourceId = "";
+  let name = "";
+  let path = "";
+  let description: string | null = null;
+  let createdTimestamp: string | null = null;
+  let modifiedTimestamp: string | null = null;
+
+  for (const s of stringTable) {
+    if (typeDescPattern.test(s)) continue;
+    if (s.startsWith("/") && !path) {
+      path = s;
+      const segments = s.split("/").filter(Boolean);
+      name = segments.pop() ?? "";
+    } else if (isResourceId(s) && !resourceId) {
+      resourceId = s;
+    } else if (/^\d{13}$/.test(s)) {
+      if (!modifiedTimestamp) modifiedTimestamp = s;
+      else if (!createdTimestamp) createdTimestamp = s;
+    } else if (s.length > 15 && !description && !isResourceId(s)) {
+      description = s;
+    }
+  }
+
+  if (!resourceId || !name) return null;
+
+  return {
+    resourceId,
+    name,
+    path,
+    description,
+    reportType: null,
+    createdTimestamp,
+    modifiedTimestamp,
+  };
+}
+
+function parseArchivedReports(decoded: GwtRpcDecodedResponse): ArchivedReport[] {
+  const { stringTable } = decoded;
+  if (stringTable.length === 0) return [];
+
+  const typeDescPattern = /^[\w.$]+\/\d+$/;
+  const archives: ArchivedReport[] = [];
+
+  function isResourceId(s: string): boolean {
+    if (s.length < 10) return false;
+    if (/^[\w+/=-]{10,}={1,2}$/.test(s)) return true;
+    if (/^\d{10,}$/.test(s)) return true;
+    return false;
+  }
+
+  for (let i = 0; i < stringTable.length; i++) {
+    const s = stringTable[i];
+    if (typeDescPattern.test(s)) continue;
+    if (!isResourceId(s)) continue;
+
+    let reportName = "";
+    let generatedAt = "";
+    let format: string | null = null;
+    let status: string | null = null;
+
+    for (let j = i + 1; j < Math.min(stringTable.length, i + 8); j++) {
+      const v = stringTable[j];
+      if (typeDescPattern.test(v)) continue;
+      if (v.startsWith("/")) continue;
+      if (/^\d{13}$/.test(v) && !generatedAt) {
+        generatedAt = new Date(parseInt(v, 10)).toISOString();
+      } else if (
+        (v === "PDF" || v === "CSV" || v === "HTML" || v === "XLS") &&
+        !format
+      ) {
+        format = v;
+      } else if (
+        (v === "COMPLETED" || v === "RUNNING" || v === "FAILED" || v === "QUEUED") &&
+        !status
+      ) {
+        status = v;
+      } else if (v.length > 3 && !reportName && !isResourceId(v)) {
+        reportName = v;
+      }
+    }
+
+    if (generatedAt || reportName) {
+      archives.push({
+        archiveId: s,
+        reportName,
+        generatedAt,
+        format,
+        status,
+      });
+    }
+  }
+
+  return archives;
+}
+
+// --- Report public API (with auth retry) ---
+
+async function fetchReportGroupTree(
+  token: string,
+  group: ReportGroup,
+  depth: number,
+  maxDepth: number
+): Promise<ReportTreeGroup[]> {
+  if (depth >= maxDepth) return [];
+
+  const decoded = await callGetReportGroupChildren(token, group.resourceId, group.path);
+  const subGroups = parseReportGroupResponse(decoded).filter(
+    (g) => g.path.startsWith(group.path + "/") && g.path !== group.path
+  );
+  const reports = parseReportListResponse(decoded, group.path).filter(
+    (r) => !subGroups.some((sg) => sg.path === r.path)
+  );
+
+  const result: ReportTreeGroup[] = [];
+
+  if (reports.length > 0) {
+    result.push({
+      name: group.name,
+      resourceId: group.resourceId,
+      path: group.path,
+      description: group.description,
+      reports,
+    });
+  }
+
+  for (const sg of subGroups) {
+    const children = await fetchReportGroupTree(token, sg, depth + 1, maxDepth);
+    result.push(...children);
+  }
+
+  if (reports.length === 0 && result.length > 0) {
+    result.unshift({
+      name: group.name,
+      resourceId: group.resourceId,
+      path: group.path,
+      description: group.description,
+      reports: [],
+    });
+  }
+
+  return result;
+}
+
+/**
+ * Get all report IDs via ReportService.findAllIds.
+ * Useful for discovery / verifying ReportService connectivity.
+ */
+export async function findAllReportIds(
+  _isRetry = false
+): Promise<string[]> {
+  const token = await getPhoenixToken();
+
+  try {
+    const decoded = await callFindAllReportIds(token);
+    // findAllIds returns IDs in the string table (excluding type descriptors)
+    const typeDescPattern = /^[\w.$]+\/\d+$/;
+    return decoded.stringTable.filter((s) => !typeDescPattern.test(s) && s.length > 5);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if ((msg.includes("401") || msg.includes("//EX")) && !_isRetry) {
+      console.log("[report-service] Auth error, re-authenticating...");
+      clearPhoenixToken();
+      return findAllReportIds(true);
+    }
+    throw error;
+  }
+}
+
+export async function getAllReports(
+  _isRetry = false
+): Promise<{ groups: ReportTreeGroup[] }> {
+  const token = await getPhoenixToken();
+
+  try {
+    console.log("[report-list] Step 1: Getting report root groups...");
+    const rootDecoded = await callGetReportRootGroups(token);
+    const rootGroups = parseReportGroupResponse(rootDecoded);
+    console.log(`[report-list] Found ${rootGroups.length} root group(s)`);
+
+    if (rootGroups.length === 0) {
+      return { groups: [] };
+    }
+
+    const root = rootGroups.reduce((a, b) =>
+      a.path.split("/").length <= b.path.split("/").length ? a : b
+    );
+
+    console.log(`[report-list] Step 2: Recursing into "${root.name}"...`);
+    const groups = await fetchReportGroupTree(token, root, 0, 5);
+
+    const totalReports = groups.reduce((sum, g) => sum + g.reports.length, 0);
+    console.log(
+      `[report-list] Done: ${totalReports} total reports across ${groups.length} group(s)`
+    );
+
+    return { groups };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if ((msg.includes("401") || msg.includes("//EX")) && !_isRetry) {
+      console.log("[report-list] Auth error, re-authenticating...");
+      clearPhoenixToken();
+      return getAllReports(true);
+    }
+    throw error;
+  }
+}
+
+export async function getReportById(
+  reportId: string,
+  _isRetry = false
+): Promise<ReportDefinition | null> {
+  const token = await getPhoenixToken();
+
+  try {
+    const decoded = await callGetReportById(token, reportId);
+    return parseReportDetail(decoded);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if ((msg.includes("401") || msg.includes("//EX")) && !_isRetry) {
+      console.log("[report-service] Auth error, re-authenticating...");
+      clearPhoenixToken();
+      return getReportById(reportId, true);
+    }
+    throw error;
+  }
+}
+
+export async function runReport(
+  reportId: string,
+  _isRetry = false
+): Promise<{ triggered: boolean; raw: unknown }> {
+  const token = await getPhoenixToken();
+
+  try {
+    const decoded = await callRunReport(token, reportId);
+    return { triggered: decoded.ok, raw: decoded };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if ((msg.includes("401") || msg.includes("//EX")) && !_isRetry) {
+      console.log("[report-service] Auth error, re-authenticating...");
+      clearPhoenixToken();
+      return runReport(reportId, true);
+    }
+    throw error;
+  }
+}
+
+export async function getArchivedReports(
+  reportId: string,
+  _isRetry = false
+): Promise<ArchivedReport[]> {
+  const token = await getPhoenixToken();
+
+  try {
+    const decoded = await callGetArchivedReports(token, reportId);
+    return parseArchivedReports(decoded);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if ((msg.includes("401") || msg.includes("//EX")) && !_isRetry) {
+      console.log("[report-service] Auth error, re-authenticating...");
+      clearPhoenixToken();
+      return getArchivedReports(reportId, true);
+    }
+    throw error;
+  }
+}
+
+export async function downloadReport(
+  archiveId: string,
+  _isRetry = false
+): Promise<{ content: string; raw: unknown }> {
+  const token = await getPhoenixToken();
+
+  try {
+    const decoded = await callDownloadReport(token, archiveId);
+    const typeDescPattern = /^[\w.$]+\/\d+$/;
+    const content = decoded.stringTable.find(
+      (s) => !typeDescPattern.test(s) && s.length > 20
+    ) ?? "";
+    return { content, raw: decoded };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if ((msg.includes("401") || msg.includes("//EX")) && !_isRetry) {
+      console.log("[report-service] Auth error, re-authenticating...");
+      clearPhoenixToken();
+      return downloadReport(archiveId, true);
     }
     throw error;
   }

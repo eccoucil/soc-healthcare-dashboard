@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import type {
-  Customer,
+  Client,
   Connector,
   ConnectorWithDevices,
   ConnectorHealth,
@@ -82,23 +82,23 @@ function useArcsightQuery<T>(
   return { data, isLoading, error, refetch };
 }
 
-export function useCustomers(search?: string): QueryResult<Customer[]> {
+export function useClients(search?: string): QueryResult<Client[]> {
   const params = search ? `?search=${encodeURIComponent(search)}` : "";
-  return useArcsightQuery<Customer[]>(`/api/arcsight/customers${params}`, {
+  return useArcsightQuery<Client[]>(`/api/arcsight/clients${params}`, {
     refetchInterval: 30_000,
   });
 }
 
-export function useCustomer(id: string | null): QueryResult<Customer> {
-  const url = id ? `/api/arcsight/customers/${id}` : null;
-  return useArcsightQuery<Customer>(url);
+export function useClient(id: string | null): QueryResult<Client> {
+  const url = id ? `/api/arcsight/clients/${id}` : null;
+  return useArcsightQuery<Client>(url);
 }
 
-export function useCustomerConnectors(
-  customerId: string | null
+export function useClientConnectors(
+  clientId: string | null
 ): QueryResult<ConnectorWithDevices[]> {
-  const url = customerId
-    ? `/api/arcsight/customers/${customerId}/connectors`
+  const url = clientId
+    ? `/api/arcsight/clients/${clientId}/connectors`
     : null;
   return useArcsightQuery<ConnectorWithDevices[]>(url, {
     refetchInterval: 30_000,
@@ -199,6 +199,23 @@ export function useChannelList(): QueryResult<ChannelListResult> {
   });
 }
 
+// --- Client tree (hierarchical channel view) ---
+
+interface ClientNode {
+  name: string;
+  resourceId: string;
+  path: string;
+  channels: ActiveChannelEntry[];
+  children: ClientNode[];
+}
+
+export function useClientTree(rootName?: string): QueryResult<ClientNode> {
+  const params = rootName ? `?root=${encodeURIComponent(rootName)}` : "";
+  return useArcsightQuery<ClientNode>(`/api/arcsight/channels/tree${params}`, {
+    refetchInterval: 60_000,
+  });
+}
+
 // --- Channel scan ---
 
 interface ChannelScanResult {
@@ -274,21 +291,21 @@ function useArcsightMutation(
 }
 
 export function useLinkConnector(
-  customerId: string | null,
+  clientId: string | null,
   onSuccess?: () => void
 ): MutationResult {
-  const url = customerId
-    ? `/api/arcsight/customers/${customerId}/connectors`
+  const url = clientId
+    ? `/api/arcsight/clients/${clientId}/connectors`
     : null;
   return useArcsightMutation(url, "POST", onSuccess);
 }
 
 export function useUnlinkConnector(
-  customerId: string | null,
+  clientId: string | null,
   onSuccess?: () => void
 ): MutationResult {
-  const url = customerId
-    ? `/api/arcsight/customers/${customerId}/connectors`
+  const url = clientId
+    ? `/api/arcsight/clients/${clientId}/connectors`
     : null;
   return useArcsightMutation(url, "DELETE", onSuccess);
 }
@@ -334,4 +351,100 @@ interface DiscoverResult {
 
 export function useChannelDiscover(): QueryResult<DiscoverResult> {
   return useArcsightQuery<DiscoverResult>("/api/arcsight/channels/discover");
+}
+
+// --- Report hooks (Phoenix GWT-RPC ReportService) ---
+
+interface ReportDefinition {
+  resourceId: string;
+  name: string;
+  path: string;
+  description: string | null;
+  reportType: string | null;
+  createdTimestamp: string | null;
+  modifiedTimestamp: string | null;
+}
+
+interface ReportTreeGroup {
+  name: string;
+  resourceId: string;
+  path: string;
+  description: string | null;
+  reports: ReportDefinition[];
+}
+
+interface ReportListResult {
+  groups: ReportTreeGroup[];
+}
+
+interface ArchivedReport {
+  archiveId: string;
+  reportName: string;
+  generatedAt: string;
+  format: string | null;
+  status: string | null;
+}
+
+interface ArchivesResult {
+  archives: ArchivedReport[];
+}
+
+export function useReports(): QueryResult<ReportListResult> {
+  return useArcsightQuery<ReportListResult>("/api/arcsight/reports", {
+    refetchInterval: 60_000,
+  });
+}
+
+export function useReport(id: string | null): QueryResult<ReportDefinition> {
+  const url = id ? `/api/arcsight/reports/${encodeURIComponent(id)}` : null;
+  return useArcsightQuery<ReportDefinition>(url);
+}
+
+export function useReportArchives(
+  reportId: string | null
+): QueryResult<ArchivesResult> {
+  const url = reportId
+    ? `/api/arcsight/reports/${encodeURIComponent(reportId)}/archives`
+    : null;
+  return useArcsightQuery<ArchivesResult>(url, {
+    refetchInterval: 30_000,
+  });
+}
+
+interface RunReportResult {
+  run: () => Promise<void>;
+  isLoading: boolean;
+  error: string | null;
+}
+
+export function useRunReport(
+  reportId: string | null,
+  onSuccess?: () => void
+): RunReportResult {
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = useCallback(async () => {
+    if (!reportId) return;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(
+        `/api/arcsight/reports/${encodeURIComponent(reportId)}/run`,
+        { method: "POST" }
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      onSuccess?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [reportId, onSuccess]);
+
+  return { run, isLoading, error };
 }

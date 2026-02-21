@@ -1,7 +1,7 @@
 import {
-  getConnectorsForCustomer,
-  linkConnectorsToCustomer,
-  unlinkConnectorsFromCustomer,
+  getConnectorsForClient,
+  linkConnectorsToClient,
+  unlinkConnectorsFromClient,
 } from "@/lib/arcsight-client";
 import type { LinkConnectorsRequest } from "@/types/arcsight";
 
@@ -11,7 +11,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const connectors = await getConnectorsForCustomer(id);
+    const connectors = await getConnectorsForClient(id);
     return Response.json(connectors, {
       headers: { "Cache-Control": "no-store" },
     });
@@ -38,7 +38,7 @@ export async function POST(
       );
     }
 
-    await linkConnectorsToCustomer(id, body.connectorIds);
+    await linkConnectorsToClient(id, body.connectorIds);
     return new Response(null, { status: 204 });
   } catch (error) {
     return Response.json(
@@ -63,7 +63,7 @@ export async function DELETE(
       );
     }
 
-    await unlinkConnectorsFromCustomer(id, body.connectorIds);
+    await unlinkConnectorsFromClient(id, body.connectorIds);
     return new Response(null, { status: 204 });
   } catch (error) {
     return Response.json(

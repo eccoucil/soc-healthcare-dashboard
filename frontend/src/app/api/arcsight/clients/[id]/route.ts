@@ -1,4 +1,4 @@
-import { getCustomerById } from "@/lib/arcsight-client";
+import { getClientById } from "@/lib/arcsight-client";
 
 export async function GET(
   _request: Request,
@@ -6,8 +6,8 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const customer = await getCustomerById(id);
-    return Response.json(customer, {
+    const client = await getClientById(id);
+    return Response.json(client, {
       headers: { "Cache-Control": "no-store" },
     });
   } catch (error) {

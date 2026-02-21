@@ -8,6 +8,7 @@ import {
   Bell,
   Building2,
   ChevronDown,
+  FileText,
   LayoutDashboard,
   LogOut,
   Search,
@@ -28,8 +29,9 @@ import {
 
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard" },
-  { icon: Building2, label: "Customers", href: "/dashboard/customers" },
-  { icon: Activity, label: "Devices", href: "/dashboard/channels" },
+  { icon: Building2, label: "Clients", href: "/dashboard/clients" },
+  { icon: Activity, label: "Devices", href: "/dashboard/devices" },
+  { icon: FileText, label: "Reports", href: "/dashboard/reports" },
 ];
 
 export default function DashboardLayout({

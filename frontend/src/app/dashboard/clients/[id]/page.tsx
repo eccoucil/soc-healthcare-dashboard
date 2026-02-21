@@ -42,8 +42,8 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import {
-  useCustomer,
-  useCustomerConnectors,
+  useClient,
+  useClientConnectors,
   useAllConnectors,
   useLinkConnector,
   useUnlinkConnector,
@@ -231,7 +231,7 @@ function ConnectorNode({
   );
 }
 
-export default function CustomerDetailPage({
+export default function ClientDetailPage({
   params,
 }: {
   params: Promise<{ id: string }>;
@@ -243,8 +243,8 @@ export default function CustomerDetailPage({
     null
   );
 
-  const { data: customer, isLoading: customerLoading, error: customerError } = useCustomer(id);
-  const { data: connectors, isLoading: connectorsLoading, error: connectorsError, refetch: refetchConnectors } = useCustomerConnectors(id);
+  const { data: client, isLoading: clientLoading, error: clientError } = useClient(id);
+  const { data: connectors, isLoading: connectorsLoading, error: connectorsError, refetch: refetchConnectors } = useClientConnectors(id);
   const { data: allConnectors } = useAllConnectors(sheetOpen);
   const linkConnector = useLinkConnector(id, refetchConnectors);
   const unlinkConnector = useUnlinkConnector(id, refetchConnectors);
@@ -288,21 +288,21 @@ export default function CustomerDetailPage({
     <>
       {/* Back Navigation */}
       <Link
-        href="/dashboard/customers"
+        href="/dashboard/clients"
         className="inline-flex items-center gap-2 text-gray-400 hover:text-white transition-colors text-sm"
       >
         <ArrowLeft className="w-4 h-4" />
-        Back to Customers
+        Back to Clients
       </Link>
 
-      {/* Customer Info Card */}
-      {customerError ? (
+      {/* Client Info Card */}
+      {clientError ? (
         <Card className="bg-[#12121a] border-white/10">
           <CardContent className="py-12 text-center">
-            <p className="text-red-400">{customerError}</p>
+            <p className="text-red-400">{clientError}</p>
           </CardContent>
         </Card>
-      ) : customerLoading ? (
+      ) : clientLoading ? (
         <Card className="bg-[#12121a] border-white/10">
           <CardHeader>
             <Skeleton className="h-8 w-64 bg-white/10" />
@@ -317,7 +317,7 @@ export default function CustomerDetailPage({
             </div>
           </CardContent>
         </Card>
-      ) : customer ? (
+      ) : client ? (
         <Card className="bg-[#12121a] border-white/10">
           <CardHeader>
             <div className="flex items-center gap-3">
@@ -326,12 +326,12 @@ export default function CustomerDetailPage({
               </div>
               <div>
                 <CardTitle className="text-white text-xl">
-                  {customer.name}
+                  {client.name}
                 </CardTitle>
                 <CardDescription className="text-gray-500">
                   {[
-                    customer.alias && `Alias: ${customer.alias}`,
-                    customer.externalID && `External ID: ${customer.externalID}`,
+                    client.alias && `Alias: ${client.alias}`,
+                    client.externalID && `External ID: ${client.externalID}`,
                   ]
                     .filter(Boolean)
                     .join(" | ") || "No additional identifiers"}
@@ -341,20 +341,20 @@ export default function CustomerDetailPage({
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-              {(customer.address ||
-                customer.city ||
-                customer.addressState ||
-                customer.postalCode ||
-                customer.country) && (
+              {(client.address ||
+                client.city ||
+                client.addressState ||
+                client.postalCode ||
+                client.country) && (
                 <div className="flex items-start gap-2 text-gray-400">
                   <MapPin className="w-4 h-4 mt-0.5 text-gray-500 flex-shrink-0" />
                   <span>
                     {[
-                      customer.address,
-                      customer.city,
-                      customer.addressState,
-                      customer.postalCode,
-                      customer.country,
+                      client.address,
+                      client.city,
+                      client.addressState,
+                      client.postalCode,
+                      client.country,
                     ]
                       .filter(Boolean)
                       .join(", ")}
@@ -364,8 +364,8 @@ export default function CustomerDetailPage({
               <div className="flex items-center gap-2 text-gray-400">
                 <Calendar className="w-4 h-4 text-gray-500" />
                 <span>
-                  Created: {formatTimestamp(customer.createdTimestamp)} |
-                  Modified: {formatTimestamp(customer.modifiedTimestamp)}
+                  Created: {formatTimestamp(client.createdTimestamp)} |
+                  Modified: {formatTimestamp(client.modifiedTimestamp)}
                 </span>
               </div>
             </div>
@@ -606,7 +606,7 @@ export default function CustomerDetailPage({
           ) : (
             <div className="text-center py-12 text-gray-500">
               <Server className="w-8 h-8 mx-auto mb-3 text-gray-600" />
-              <p>No connectors linked to this customer</p>
+              <p>No connectors linked to this client</p>
               <p className="text-sm mt-1">
                 Use &quot;Link Connector&quot; to associate infrastructure
                 agents
@@ -623,7 +623,7 @@ export default function CustomerDetailPage({
             <SheetTitle className="text-white">Link Connector</SheetTitle>
             <SheetDescription className="text-gray-500">
               Select a connector to associate with{" "}
-              {customer?.name ?? "this customer"}
+              {client?.name ?? "this client"}
             </SheetDescription>
           </SheetHeader>
 
