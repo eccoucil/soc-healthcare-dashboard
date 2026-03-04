@@ -18,6 +18,8 @@ export interface Client extends ResourceBase {
   postalCode?: string;
   country?: string;
   externalID?: string;
+  /** Where this client was discovered: REST API customer or channel tree folder */
+  _source?: "rest" | "tree";
 }
 
 /** ArcSight Connector resource */
@@ -26,6 +28,8 @@ export interface Connector extends ResourceBase {
   owningServer?: string;
   alive?: boolean;
   networks?: string[];
+  hostName?: string;
+  address?: string;
   // Health flags
   disabled?: boolean;
   disabledReason?: string;

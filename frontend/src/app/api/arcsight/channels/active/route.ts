@@ -5,6 +5,7 @@ import {
   probeBucketPolling,
   dumpResponseStructure,
 } from "@/lib/arcsight-channel-client";
+import { withAuthRetry, AuthError } from "@/lib/session";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -16,38 +17,36 @@ export async function GET(request: Request) {
   const useV1 = searchParams.get("v1") === "true";
 
   try {
-    if (probe) {
-      const result = await probeBucketPolling(channelId);
-      const phase1Dump = dumpResponseStructure(result.phase1.raw);
-      const phase2Dump = "error" in result.phase2
-        ? null
-        : dumpResponseStructure(result.phase2.raw);
-      return Response.json({ ...result, phase1Dump, phase2Dump }, {
-        headers: { "Cache-Control": "no-store" },
-      });
-    }
-    if (dump) {
-      const decoded = await getActiveChannelEventsRaw(channelId);
-      const structure = dumpResponseStructure(decoded);
-      return Response.json({ decoded, structure }, {
-        headers: { "Cache-Control": "no-store" },
-      });
-    }
-    if (raw) {
-      const decoded = await getActiveChannelEventsRaw(channelId);
-      return Response.json(decoded, {
-        headers: { "Cache-Control": "no-store" },
-      });
-    }
+    const { data: result, cookieHeader } = await withAuthRetry(async (auth) => {
+      if (probe) {
+        const probeResult = await probeBucketPolling(auth, channelId);
+        const phase1Dump = dumpResponseStructure(probeResult.phase1.raw);
+        const phase2Dump = "error" in probeResult.phase2
+          ? null
+          : dumpResponseStructure(probeResult.phase2.raw);
+        return { ...probeResult, phase1Dump, phase2Dump };
+      }
+      if (dump) {
+        const decoded = await getActiveChannelEventsRaw(auth, channelId);
+        const structure = dumpResponseStructure(decoded);
+        return { decoded, structure };
+      }
+      if (raw) {
+        return getActiveChannelEventsRaw(auth, channelId);
+      }
 
-    // Default: subscription-aware flow (v2) with fallback to v1
-    const result = !useV1 && channelId
-      ? await getActiveChannelEventsWithSubscription(channelId)
-      : await getActiveChannelEvents(channelId);
-    return Response.json(result, {
-      headers: { "Cache-Control": "no-store" },
+      // Default: subscription-aware flow (v2) with fallback to v1
+      return !useV1 && channelId
+        ? getActiveChannelEventsWithSubscription(auth, channelId)
+        : getActiveChannelEvents(auth, channelId);
     });
+    const headers: Record<string, string> = { "Cache-Control": "no-store" };
+    if (cookieHeader) headers["Set-Cookie"] = cookieHeader;
+    return Response.json(result, { headers });
   } catch (error) {
+    if (error instanceof AuthError) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
     const message =
       error instanceof Error ? error.message : "Unknown error";
     console.error("[api/channels/active]", message);

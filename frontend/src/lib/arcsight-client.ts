@@ -3,6 +3,7 @@ import {
   createArcsightDispatcher,
   getProxyInfo,
 } from "@/lib/arcsight-dispatcher";
+import type { SessionAuth } from "@/lib/session";
 import type {
   Client,
   Connector,
@@ -15,18 +16,30 @@ import type {
 
 const BASE_URL = process.env.ARCSIGHT_API_BASE_URL;
 const LOGIN_URL = process.env.ARCSIGHT_LOGIN_URL;
-const USERNAME = process.env.ARCSIGHT_USERNAME;
-const PASSWORD = process.env.ARCSIGHT_PASSWORD;
-const STATIC_TOKEN = process.env.ARCSIGHT_API_TOKEN;
 
-// --- Token management ---
+// Connection pool for ArcSight REST API — routes through proxy if configured.
+const dispatcher = createArcsightDispatcher({
+  connections: 6,
+  pipelining: 1,
+  connectTimeout: 15_000,
+});
+console.log(`[arcsight-client] Proxy: ${getProxyInfo()}`);
 
-let cachedToken: string | null = null;
+// --- Login (called by auth login route) ---
 
-async function login(): Promise<string> {
-  if (!LOGIN_URL || !USERNAME || !PASSWORD) {
+const DEFAULT_TIMEOUT_MS = 15_000;
+
+/**
+ * Authenticate with ArcSight ESM REST API.
+ * Returns a REST token usable across core-service and manager-service.
+ */
+export async function loginToArcsight(
+  username: string,
+  password: string
+): Promise<string> {
+  if (!LOGIN_URL) {
     throw new Error(
-      "ArcSight login not configured. Set ARCSIGHT_LOGIN_URL, ARCSIGHT_USERNAME, and ARCSIGHT_PASSWORD in .env.local"
+      "ArcSight login not configured. Set ARCSIGHT_LOGIN_URL in .env.local"
     );
   }
 
@@ -43,7 +56,7 @@ async function login(): Promise<string> {
         Accept: "application/json",
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: `login=${encodeURIComponent(USERNAME)}&password=${encodeURIComponent(PASSWORD)}`,
+      body: `login=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
       signal: controller.signal,
       // @ts-expect-error -- undici dispatcher is not in the standard RequestInit type
       dispatcher,
@@ -69,40 +82,16 @@ async function login(): Promise<string> {
   }
 
   console.log("[arcsight-login] Authenticated successfully");
-  cachedToken = token;
   return token;
 }
 
-async function getToken(): Promise<string> {
-  // Static token takes priority (manual override)
-  if (STATIC_TOKEN) return STATIC_TOKEN;
-  // Return cached token if available
-  if (cachedToken) return cachedToken;
-  // Otherwise login
-  return login();
-}
-
-function clearCachedToken(): void {
-  cachedToken = null;
-}
-
-// Connection pool for ArcSight REST API — routes through proxy if configured.
-const dispatcher = createArcsightDispatcher({
-  connections: 6,
-  pipelining: 1,
-  connectTimeout: 15_000,
-});
-console.log(`[arcsight-client] Proxy: ${getProxyInfo()}`);
-
 // --- Generic fetch wrapper ---
 
-const DEFAULT_TIMEOUT_MS = 15_000;
-
 async function arcsightFetch<T>(
+  token: string,
   path: string,
   revalidate = 30,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-  _isRetry = false
+  timeoutMs = DEFAULT_TIMEOUT_MS
 ): Promise<T> {
   if (!BASE_URL) {
     throw new Error(
@@ -110,7 +99,6 @@ async function arcsightFetch<T>(
     );
   }
 
-  const token = await getToken();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -126,11 +114,8 @@ async function arcsightFetch<T>(
       dispatcher,
     });
 
-    if (res.status === 401 && !_isRetry) {
-      clearTimeout(timer);
-      console.log(`[arcsight] 401 on ${path} — re-authenticating`);
-      clearCachedToken();
-      return arcsightFetch<T>(path, revalidate, timeoutMs, true);
+    if (res.status === 401) {
+      throw new Error(`ArcSight API error: 401 Unauthorized`);
     }
 
     if (!res.ok) {
@@ -144,9 +129,9 @@ async function arcsightFetch<T>(
 }
 
 async function arcsightPost(
+  token: string,
   path: string,
-  body: unknown,
-  _isRetry = false
+  body: unknown
 ): Promise<void> {
   if (!BASE_URL) {
     throw new Error(
@@ -154,7 +139,6 @@ async function arcsightPost(
     );
   }
 
-  const token = await getToken();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
 
@@ -172,11 +156,8 @@ async function arcsightPost(
       dispatcher,
     });
 
-    if (res.status === 401 && !_isRetry) {
-      clearTimeout(timer);
-      console.log(`[arcsight] 401 on POST ${path} — re-authenticating`);
-      clearCachedToken();
-      return arcsightPost(path, body, true);
+    if (res.status === 401) {
+      throw new Error(`ArcSight API error: 401 Unauthorized`);
     }
 
     if (!res.ok) {
@@ -187,23 +168,67 @@ async function arcsightPost(
   }
 }
 
+async function arcsightPostJson<T>(
+  token: string,
+  path: string,
+  body: unknown,
+  timeoutMs = DEFAULT_TIMEOUT_MS
+): Promise<T> {
+  if (!BASE_URL) {
+    throw new Error(
+      "ArcSight API not configured. Set ARCSIGHT_API_BASE_URL in .env.local"
+    );
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(`${BASE_URL}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+      // @ts-expect-error -- undici dispatcher is not in the standard RequestInit type
+      dispatcher,
+    });
+
+    if (res.status === 401) {
+      throw new Error(`ArcSight API error: 401 Unauthorized`);
+    }
+
+    if (!res.ok) {
+      throw new Error(`ArcSight API error: ${res.status} ${res.statusText}`);
+    }
+
+    return res.json() as Promise<T>;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // --- Client methods (ArcSight "Customer" resources) ---
 
-export async function getAllClientIds(): Promise<string[]> {
-  return arcsightFetch<string[]>("/v1/customers/allIds", 60);
+export async function getAllClientIds(auth: SessionAuth): Promise<string[]> {
+  return arcsightFetch<string[]>(auth.restToken, "/v1/customers/allIds", 60);
 }
 
-export async function getClientsByIds(ids: string[]): Promise<Client[]> {
+export async function getClientsByIds(auth: SessionAuth, ids: string[]): Promise<Client[]> {
   const params = ids.map((id) => `ids=${encodeURIComponent(id)}`).join("&");
-  return arcsightFetch<Client[]>(`/v1/customers/ids?${params}`, 60);
+  return arcsightFetch<Client[]>(auth.restToken, `/v1/customers/ids?${params}`, 60);
 }
 
-export async function getClientById(id: string): Promise<Client> {
-  return arcsightFetch<Client>(`/v1/customers/${encodeURIComponent(id)}`);
+export async function getClientById(auth: SessionAuth, id: string): Promise<Client> {
+  return arcsightFetch<Client>(auth.restToken, `/v1/customers/${encodeURIComponent(id)}`);
 }
 
-export async function getClientPathsToRoot(id: string): Promise<string[]> {
+export async function getClientPathsToRoot(auth: SessionAuth, id: string): Promise<string[]> {
   return arcsightFetch<string[]>(
+    auth.restToken,
     `/v1/customers/${encodeURIComponent(id)}/allPathsToRoot`
   );
 }
@@ -211,50 +236,53 @@ export async function getClientPathsToRoot(id: string): Promise<string[]> {
 // --- Connector methods ---
 
 export async function getConnectorDevices(
+  auth: SessionAuth,
   timeoutMs = 45_000
 ): Promise<ConnectorDeviceMap> {
   return arcsightFetch<ConnectorDeviceMap>(
+    auth.restToken,
     "/v1/connectors/devices",
     30,
     timeoutMs
   );
 }
 
-export async function getConnectorsByIds(ids: string[]): Promise<Connector[]> {
+export async function getConnectorsByIds(auth: SessionAuth, ids: string[]): Promise<Connector[]> {
   const params = ids.map((id) => `ids=${encodeURIComponent(id)}`).join("&");
-  return arcsightFetch<Connector[]>(`/v1/connectors/ids?${params}`);
+  return arcsightFetch<Connector[]>(auth.restToken, `/v1/connectors/ids?${params}`);
 }
 
-export async function getLiveConnectorIds(): Promise<string[]> {
-  return arcsightFetch<string[]>("/v1/connectors/live", 10);
+export async function getLiveConnectorIds(auth: SessionAuth): Promise<string[]> {
+  return arcsightFetch<string[]>(auth.restToken, "/v1/connectors/live", 10);
 }
 
-export async function getDeadConnectorIds(): Promise<string[]> {
-  return arcsightFetch<string[]>("/v1/connectors/dead", 10);
+export async function getDeadConnectorIds(auth: SessionAuth): Promise<string[]> {
+  return arcsightFetch<string[]>(auth.restToken, "/v1/connectors/dead", 10);
 }
 
 // --- Group methods ---
 
-export async function getGroupChildren(groupId: string): Promise<string[]> {
+export async function getGroupChildren(auth: SessionAuth, groupId: string): Promise<string[]> {
   return arcsightFetch<string[]>(
+    auth.restToken,
     `/v1/groups/${encodeURIComponent(groupId)}/children`
   );
 }
 
 // --- Connector listing methods ---
 
-export async function getAllConnectorIds(): Promise<string[]> {
-  return arcsightFetch<string[]>("/v1/connectors/allIds", 60);
+export async function getAllConnectorIds(auth: SessionAuth): Promise<string[]> {
+  return arcsightFetch<string[]>(auth.restToken, "/v1/connectors/allIds", 60);
 }
 
-export async function getAllConnectors(): Promise<Connector[]> {
-  const ids = await getAllConnectorIds();
+export async function getAllConnectors(auth: SessionAuth): Promise<Connector[]> {
+  const ids = await getAllConnectorIds(auth);
   if (ids.length === 0) return [];
 
   const batchSize = 50;
   const all: Connector[] = [];
   for (let i = 0; i < ids.length; i += batchSize) {
-    const batch = await getConnectorsByIds(ids.slice(i, i + batchSize));
+    const batch = await getConnectorsByIds(auth, ids.slice(i, i + batchSize));
     all.push(...batch);
   }
   return all;
@@ -262,8 +290,8 @@ export async function getAllConnectors(): Promise<Connector[]> {
 
 // --- Connector-client linking methods ---
 
-async function getClientParentGroupId(clientId: string): Promise<string> {
-  const paths = await getClientPathsToRoot(clientId);
+async function getClientParentGroupId(auth: SessionAuth, clientId: string): Promise<string> {
+  const paths = await getClientPathsToRoot(auth, clientId);
   if (paths.length === 0) {
     throw new Error("Client has no parent group");
   }
@@ -271,22 +299,26 @@ async function getClientParentGroupId(clientId: string): Promise<string> {
 }
 
 export async function linkConnectorsToClient(
+  auth: SessionAuth,
   clientId: string,
   connectorIds: string[]
 ): Promise<void> {
-  const groupId = await getClientParentGroupId(clientId);
+  const groupId = await getClientParentGroupId(auth, clientId);
   await arcsightPost(
+    auth.restToken,
     `/v1/groups/${encodeURIComponent(groupId)}/children`,
     connectorIds
   );
 }
 
 export async function unlinkConnectorsFromClient(
+  auth: SessionAuth,
   clientId: string,
   connectorIds: string[]
 ): Promise<void> {
-  const groupId = await getClientParentGroupId(clientId);
+  const groupId = await getClientParentGroupId(auth, clientId);
   await arcsightPost(
+    auth.restToken,
     `/v1/groups/${encodeURIComponent(groupId)}/removeChildren`,
     connectorIds
   );
@@ -305,11 +337,12 @@ export async function unlinkConnectorsFromClient(
  *   4. Attach device details from the connector-devices map
  */
 export async function getConnectorsForClient(
+  auth: SessionAuth,
   clientId: string
 ): Promise<ConnectorWithDevices[]> {
   const tag = `[getConnectorsForClient ${clientId}]`;
 
-  const paths = await getClientPathsToRoot(clientId);
+  const paths = await getClientPathsToRoot(auth, clientId);
   console.log(`${tag} Step 1 — allPathsToRoot: ${JSON.stringify(paths)}`);
 
   if (paths.length === 0) {
@@ -324,7 +357,7 @@ export async function getConnectorsForClient(
     return [];
   }
   const parentGroupId = segments[segments.length - 2];
-  const childIds = await getGroupChildren(parentGroupId);
+  const childIds = await getGroupChildren(auth, parentGroupId);
   console.log(
     `${tag} Step 2 — group ${parentGroupId} children (${childIds.length}): ${JSON.stringify(childIds.slice(0, 10))}${childIds.length > 10 ? "…" : ""}`
   );
@@ -336,11 +369,11 @@ export async function getConnectorsForClient(
 
   // Fetch connector details and device map in parallel
   const [connectors, deviceMap] = await Promise.all([
-    getConnectorsByIds(childIds).catch((err) => {
+    getConnectorsByIds(auth, childIds).catch((err) => {
       console.error(`${tag} Step 3 — getConnectorsByIds FAILED:`, err);
       return [] as Connector[];
     }),
-    getConnectorDevices().catch((err) => {
+    getConnectorDevices(auth).catch((err) => {
       console.error(`${tag} Step 4 — getConnectorDevices FAILED:`, err);
       return {} as ConnectorDeviceMap;
     }),
@@ -351,8 +384,6 @@ export async function getConnectorsForClient(
     `| Step 4 — deviceMap keys: ${Object.keys(deviceMap).length}`
   );
 
-  // Filter to only valid connectors (getConnectorsByIds may skip non-connector IDs)
-  // and attach device info
   return connectors.map((connector) => ({
     ...connector,
     devices: deviceMap[connector.resourceId] ?? [],
@@ -360,10 +391,10 @@ export async function getConnectorsForClient(
 }
 
 /** Aggregated connector health status */
-export async function getConnectorHealth(): Promise<ConnectorHealth> {
+export async function getConnectorHealth(auth: SessionAuth): Promise<ConnectorHealth> {
   const [live, dead] = await Promise.all([
-    getLiveConnectorIds(),
-    getDeadConnectorIds(),
+    getLiveConnectorIds(auth),
+    getDeadConnectorIds(auth),
   ]);
 
   return {
@@ -374,10 +405,10 @@ export async function getConnectorHealth(): Promise<ConnectorHealth> {
 }
 
 /** Enriched connector health: full details tagged with live/dead status */
-export async function getConnectorHealthDetailed(): Promise<ConnectorHealthEnriched> {
+export async function getConnectorHealthDetailed(auth: SessionAuth): Promise<ConnectorHealthEnriched> {
   const [health, connectors] = await Promise.all([
-    getConnectorHealth(),
-    getAllConnectors(),
+    getConnectorHealth(auth),
+    getAllConnectors(auth),
   ]);
 
   const liveSet = new Set(health.live);
@@ -402,8 +433,8 @@ export async function getConnectorHealthDetailed(): Promise<ConnectorHealthEnric
 }
 
 /** Get all clients, optionally filtered by search term */
-export async function getAllClients(search?: string): Promise<Client[]> {
-  const ids = await getAllClientIds();
+export async function getAllClients(auth: SessionAuth, search?: string): Promise<Client[]> {
+  const ids = await getAllClientIds(auth);
 
   if (ids.length === 0) {
     return [];
@@ -413,7 +444,7 @@ export async function getAllClients(search?: string): Promise<Client[]> {
   const batchSize = 50;
   let clients: Client[] = [];
   for (let i = 0; i < ids.length; i += batchSize) {
-    const batch = await getClientsByIds(ids.slice(i, i + batchSize));
+    const batch = await getClientsByIds(auth, ids.slice(i, i + batchSize));
     clients.push(...batch);
   }
 
@@ -432,58 +463,90 @@ export async function getAllClients(search?: string): Promise<Client[]> {
   return clients;
 }
 
-// --- Events methods ---
-
 /**
- * POST with JSON response (unlike arcsightPost which returns void).
- * Used for events/retrieve which returns SecurityEvent[].
+ * Hybrid client discovery: merge REST API customers with GWT-RPC channel tree folders.
+ *
+ * The REST API only returns first-class "Customer" resources, but operators often create
+ * client folders in the channel tree that aren't registered as Customers. This function
+ * discovers both and merges them — REST data is primary when a name match exists.
  */
-async function arcsightPostJson<T>(
-  path: string,
-  body: unknown,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-  _isRetry = false
-): Promise<T> {
-  if (!BASE_URL) {
-    throw new Error(
-      "ArcSight API not configured. Set ARCSIGHT_API_BASE_URL in .env.local"
-    );
+export async function getHybridClients(auth: SessionAuth, search?: string): Promise<Client[]> {
+  // Lazy import to avoid circular dependency (channel-client imports from client)
+  const { getClientTree } = await import("@/lib/arcsight-channel-client");
+
+  // Fetch both sources in parallel
+  const [restClients, treeRoot] = await Promise.all([
+    getAllClients(auth).catch((err) => {
+      console.warn("[hybrid-clients] REST API failed, falling back to tree-only:", err.message);
+      return [] as Client[];
+    }),
+    getClientTree(auth, "FORTRESS").catch((err) => {
+      console.warn("[hybrid-clients] Tree fetch failed, falling back to REST-only:", err.message);
+      return null;
+    }),
+  ]);
+
+  // Tag REST clients
+  const taggedRest = restClients.map((c) => ({ ...c, _source: "rest" as const }));
+
+  if (!treeRoot) {
+    return applySearch(taggedRest, search);
   }
 
-  const token = await getToken();
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(`${BASE_URL}${path}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-      // @ts-expect-error -- undici dispatcher is not in the standard RequestInit type
-      dispatcher,
-    });
-
-    if (res.status === 401 && !_isRetry) {
-      clearTimeout(timer);
-      console.log(`[arcsight] 401 on POST ${path} — re-authenticating`);
-      clearCachedToken();
-      return arcsightPostJson<T>(path, body, timeoutMs, true);
+  // Extract client-level nodes from the tree.
+  // Tree structure: FORTRESS → Device Monitoring → <CLIENT_NAME>
+  // So client nodes are at depth 2 (children of "Device Monitoring" which is child of FORTRESS).
+  const treeClients: { name: string; resourceId: string }[] = [];
+  for (const child of treeRoot.children) {
+    // child = "Device Monitoring" or similar top-level group
+    for (const clientNode of child.children) {
+      treeClients.push({ name: clientNode.name, resourceId: clientNode.resourceId });
     }
-
-    if (!res.ok) {
-      throw new Error(`ArcSight API error: ${res.status} ${res.statusText}`);
-    }
-
-    return res.json() as Promise<T>;
-  } finally {
-    clearTimeout(timer);
   }
+
+  // Build a lookup of REST clients by lowercase name for matching
+  const restByName = new Map<string, Client>();
+  for (const c of taggedRest) {
+    restByName.set(c.name.toLowerCase(), c);
+  }
+
+  // Merge: REST data preferred, tree-only clients get a minimal Client object
+  const merged = new Map<string, Client>();
+
+  // Add all REST clients first (they have full metadata)
+  for (const c of taggedRest) {
+    merged.set(c.name.toLowerCase(), c);
+  }
+
+  // Add tree-only clients (those not matched to a REST customer)
+  for (const tc of treeClients) {
+    const key = tc.name.toLowerCase();
+    if (!merged.has(key)) {
+      merged.set(key, {
+        resourceId: tc.resourceId || `tree:${tc.name}`,
+        name: tc.name,
+        _source: "tree",
+      });
+    }
+  }
+
+  return applySearch(Array.from(merged.values()), search);
 }
+
+function applySearch(clients: Client[], search?: string): Client[] {
+  if (!search) return clients;
+  const term = search.toLowerCase();
+  return clients.filter(
+    (c) =>
+      c.name?.toLowerCase().includes(term) ||
+      c.alias?.toLowerCase().includes(term) ||
+      c.externalID?.toLowerCase().includes(term) ||
+      c.city?.toLowerCase().includes(term) ||
+      c.country?.toLowerCase().includes(term)
+  );
+}
+
+// --- Events methods ---
 
 export interface SecurityEventsRequest {
   ids: number[];
@@ -505,9 +568,11 @@ export interface EventCountResponse {
  * POST /v1/events/retrieve
  */
 export async function retrieveEvents(
+  auth: SessionAuth,
   request: SecurityEventsRequest
 ): Promise<SecurityEvent[]> {
   return arcsightPostJson<SecurityEvent[]>(
+    auth.restToken,
     "/v1/events/retrieve",
     request,
     30_000 // Events can be slow
@@ -519,10 +584,12 @@ export async function retrieveEvents(
  * GET /v1/events/count?startTime=...&endTime=...
  */
 export async function getEventCount(
+  auth: SessionAuth,
   startTime: number,
   endTime: number
 ): Promise<EventCountResponse> {
   return arcsightFetch<EventCountResponse>(
+    auth.restToken,
     `/v1/events/count?startTime=${startTime}&endTime=${endTime}`,
     0 // No revalidation cache
   );
@@ -532,8 +599,9 @@ export async function getEventCount(
  * Get event field info map (metadata about all possible event fields).
  * GET /v1/events/getEventFieldInfoMap
  */
-export async function getEventFieldInfoMap(): Promise<Record<string, unknown>> {
+export async function getEventFieldInfoMap(auth: SessionAuth): Promise<Record<string, unknown>> {
   return arcsightFetch<Record<string, unknown>>(
+    auth.restToken,
     "/v1/events/getEventFieldInfoMap",
     300 // Cache for 5 minutes
   );

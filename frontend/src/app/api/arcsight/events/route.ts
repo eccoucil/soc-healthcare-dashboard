@@ -4,6 +4,7 @@ import {
   getEventCount,
   getEventFieldInfoMap,
 } from "@/lib/arcsight-client";
+import { withAuthRetry, AuthError } from "@/lib/session";
 
 /**
  * GET /api/arcsight/events
@@ -28,21 +29,6 @@ export async function GET(request: NextRequest) {
       10
     );
 
-    if (mode === "fields") {
-      const fieldMap = await getEventFieldInfoMap();
-      return Response.json(fieldMap, {
-        headers: { "Cache-Control": "no-store" },
-      });
-    }
-
-    if (mode === "count") {
-      const countResult = await getEventCount(startTime, endTime);
-      return Response.json(
-        { startTime, endTime, ...countResult },
-        { headers: { "Cache-Control": "no-store" } }
-      );
-    }
-
     if (mode === "retrieve") {
       const idsParam = searchParams.get("ids");
       if (!idsParam) {
@@ -58,10 +44,36 @@ export async function GET(request: NextRequest) {
           { status: 400 }
         );
       }
-      const events = await retrieveEvents({ ids, startTime, endTime });
+
+      const { data: events, cookieHeader } = await withAuthRetry(async (auth) => {
+        return retrieveEvents(auth, { ids, startTime, endTime });
+      });
+      const headers: Record<string, string> = { "Cache-Control": "no-store" };
+      if (cookieHeader) headers["Set-Cookie"] = cookieHeader;
       return Response.json(
         { events, count: events.length, startTime, endTime },
-        { headers: { "Cache-Control": "no-store" } }
+        { headers }
+      );
+    }
+
+    if (mode === "fields") {
+      const { data: fieldMap, cookieHeader } = await withAuthRetry(async (auth) => {
+        return getEventFieldInfoMap(auth);
+      });
+      const headers: Record<string, string> = { "Cache-Control": "no-store" };
+      if (cookieHeader) headers["Set-Cookie"] = cookieHeader;
+      return Response.json(fieldMap, { headers });
+    }
+
+    if (mode === "count") {
+      const { data: countResult, cookieHeader } = await withAuthRetry(async (auth) => {
+        return getEventCount(auth, startTime, endTime);
+      });
+      const headers: Record<string, string> = { "Cache-Control": "no-store" };
+      if (cookieHeader) headers["Set-Cookie"] = cookieHeader;
+      return Response.json(
+        { startTime, endTime, ...countResult },
+        { headers }
       );
     }
 
@@ -70,6 +82,9 @@ export async function GET(request: NextRequest) {
       { status: 400 }
     );
   } catch (error) {
+    if (error instanceof AuthError) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
     const message =
       error instanceof Error ? error.message : "Unknown error";
     console.error("[api/events]", message);

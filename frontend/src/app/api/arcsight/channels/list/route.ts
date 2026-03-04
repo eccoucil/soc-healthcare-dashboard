@@ -1,4 +1,9 @@
 import { getAllActiveChannels, debugGetRootGroups, debugGetChannelsForGroup } from "@/lib/arcsight-channel-client";
+import { createServerCache } from "@/lib/server-cache";
+import { withAuthRetry, AuthError } from "@/lib/session";
+
+// 300s TTL — matches tree route since they call the same underlying walk
+const listCache = createServerCache(300_000);
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -6,23 +11,23 @@ export async function GET(request: Request) {
   const debugGroup = searchParams.get("debugGroup");
 
   try {
-    if (debug) {
-      const raw = await debugGetRootGroups();
-      return Response.json(raw, {
-        headers: { "Cache-Control": "no-store" },
-      });
-    }
-    if (debugGroup) {
-      const raw = await debugGetChannelsForGroup(debugGroup);
-      return Response.json(raw, {
-        headers: { "Cache-Control": "no-store" },
-      });
-    }
-    const result = await getAllActiveChannels();
-    return Response.json(result, {
-      headers: { "Cache-Control": "no-store" },
+    const { data: result, cookieHeader } = await withAuthRetry(async (auth) => {
+      // Debug endpoints bypass cache
+      if (debug) {
+        return debugGetRootGroups(auth);
+      }
+      if (debugGroup) {
+        return debugGetChannelsForGroup(auth, debugGroup);
+      }
+      return listCache.getOrFetch(() => getAllActiveChannels(auth));
     });
+    const headers: Record<string, string> = { "Cache-Control": "no-store" };
+    if (cookieHeader) headers["Set-Cookie"] = cookieHeader;
+    return Response.json(result, { headers });
   } catch (error) {
+    if (error instanceof AuthError) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
     const message =
       error instanceof Error ? error.message : "Unknown error";
     console.error("[api/channels/list]", message);

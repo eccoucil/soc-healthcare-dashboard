@@ -1,7 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
-import Image from "next/image";
+import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "motion/react";
 import { toast } from "sonner";
@@ -9,43 +8,30 @@ import {
   Eye,
   EyeOff,
   Lock,
-  Mail,
   User,
   Shield,
   ArrowRight,
   Activity,
   Server,
   Globe,
-  CheckCircle,
-  Circle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardFooter } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Skeleton } from "@/components/ui/skeleton";
+import { MatrixBackground } from "@/components/matrix-background";
 import {
-  validatePassword,
-  passwordsMatch,
+  containsDangerousPatterns,
+  sanitizePassword,
 } from "@/lib/password-validation";
-import { createClient } from "@/lib/supabase/client";
-import { useConnectorHealth } from "@/hooks/use-arcsight";
-
-const WHITELISTED_DOMAINS = ["@eccouncil.org"];
 
 export const AuthPage = () => {
   const router = useRouter();
-  const supabase = createClient();
-  const { data: health } = useConnectorHealth();
   const isDarkMode = true;
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [loginEmail, setLoginEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
-  const [registerEmail, setRegisterEmail] = useState("");
-  const [registerPassword, setRegisterPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
+
   // Toggle dark mode class on html/body
   useEffect(() => {
     if (isDarkMode) {
@@ -55,161 +41,60 @@ export const AuthPage = () => {
     }
   }, [isDarkMode]);
 
-  // Derive password validation from current input (no effect needed)
-  const { passwordStrength, passwordRequirements } = useMemo(() => {
-    if (!registerPassword) return { passwordStrength: null, passwordRequirements: null };
-    const validation = validatePassword(registerPassword);
-    return { passwordStrength: validation.strength, passwordRequirements: validation.requirements };
-  }, [registerPassword]);
-
-  const isValidEmailDomain = (email: string): boolean => {
-    return WHITELISTED_DOMAINS.some((domain) =>
-      email.toLowerCase().endsWith(domain)
-    );
-  };
-
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isValidEmailDomain(loginEmail)) {
-      toast.error("Invalid email domain", {
-        description: "Only @eccouncil.org email addresses are allowed.",
-      });
+    if (!username.trim()) {
+      toast.error("Username required");
       return;
     }
-
-    // Full password validation (same as registration)
-    const validation = validatePassword(loginPassword);
-
-    if (validation.hasDangerousPatterns) {
-      toast.error("Invalid password", {
-        description: "Password contains invalid characters.",
-      });
+    if (containsDangerousPatterns(loginPassword)) {
+      toast.error("Invalid password", { description: "Password contains invalid characters." });
       return;
     }
-
-    if (validation.isCommonPassword) {
-      toast.error("Weak password", {
-        description: "This password is too common.",
-      });
-      return;
-    }
-
-    if (validation.errors.length > 0) {
-      toast.error("Password does not meet requirements", {
-        description: validation.errors[0],
-      });
-      return;
-    }
-
     setIsLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({
-      email: loginEmail,
-      password: loginPassword,
-    });
-    setIsLoading(false);
-
-    if (error) {
-      toast.error("Login failed", { description: error.message });
-      return;
-    }
-
-    toast.success("Login successful", {
-      description: "Redirecting to dashboard...",
-    });
-    router.push("/dashboard");
-  };
-
-  const handleRegisterSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!isValidEmailDomain(registerEmail)) {
-      toast.error("Invalid email domain", {
-        description: "Only @eccouncil.org email addresses are allowed.",
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password: sanitizePassword(loginPassword) }),
       });
-      return;
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error("Login failed", { description: data.error ?? "Invalid credentials" });
+        return;
+      }
+      toast.success("Login successful", { description: "Redirecting to dashboard..." });
+      router.push("/dashboard");
+    } catch {
+      toast.error("Login failed", { description: "Network error. Please try again." });
+    } finally {
+      setIsLoading(false);
     }
-
-    // Full password validation for registration
-    const validation = validatePassword(registerPassword);
-
-    if (validation.hasDangerousPatterns) {
-      toast.error("Invalid password", {
-        description: "Password contains invalid characters.",
-      });
-      return;
-    }
-
-    if (validation.isCommonPassword) {
-      toast.error("Weak password", {
-        description: "This password is too common. Please choose a stronger password.",
-      });
-      return;
-    }
-
-    if (validation.errors.length > 0) {
-      toast.error("Password does not meet requirements", {
-        description: validation.errors[0],
-      });
-      return;
-    }
-
-    if (validation.strength === 'weak') {
-      toast.error("Weak password", {
-        description: "Please choose a stronger password.",
-      });
-      return;
-    }
-
-    // Check password confirmation
-    if (!passwordsMatch(registerPassword, confirmPassword)) {
-      toast.error("Passwords do not match", {
-        description: "Please ensure both passwords are identical.",
-      });
-      return;
-    }
-
-    setIsLoading(true);
-    const { error } = await supabase.auth.signUp({
-      email: registerEmail,
-      password: registerPassword,
-    });
-    setIsLoading(false);
-
-    if (error) {
-      toast.error("Registration failed", { description: error.message });
-      return;
-    }
-
-    toast.success("Account created", {
-      description: "Check your email for a verification link.",
-    });
   };
 
   return (
     <div
-      className={`relative min-h-screen w-full grid lg:grid-cols-2 transition-colors duration-300 ${isDarkMode ? "text-white" : "text-gray-900"}`}
+      className={`relative min-h-screen w-full grid lg:grid-cols-2 bg-[#050505] transition-colors duration-300 ${isDarkMode ? "text-white" : "text-gray-900"}`}
     >
-      {/* Full Screen Background Image */}
+      {/* Three.js Matrix Background */}
       <div className="fixed inset-0 z-0">
-        <Image
-          src="/soc-auth.png"
-          alt="SOC Background"
-          fill
-          className="object-cover"
-          priority
-        />
-        {/* Dark overlay for better readability */}
-        <div className="absolute inset-0 bg-black/60" />
+        <MatrixBackground />
+        {/* Gradients for depth */}
+        <div className="absolute inset-0 bg-gradient-to-b from-black/80 via-transparent to-black/80" />
+        <div className="absolute inset-0 bg-gradient-to-r from-black/80 via-transparent to-black/80" />
       </div>
 
       {/* Left Column - Visual/Image Area */}
-      <div className="relative z-10 hidden lg:flex flex-col justify-between p-12 overflow-hidden">
+      <div className="relative z-10 hidden lg:flex flex-col justify-between p-12 overflow-hidden border-r border-white/5">
+        {/* Futuristic Grid Pattern */}
+        <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:40px_40px] [mask-image:radial-gradient(ellipse_50%_50%_at_50%_50%,black_70%,transparent_100%)]" />
 
         {/* Content Overlay */}
         <div className="relative z-10">
-          <div className="flex items-center gap-2 text-red-500 mb-6">
-            <Activity className="h-6 w-6 animate-pulse" />
-            <span className="font-mono text-sm tracking-widest uppercase">
-              System Status: Secure
+          <div className="flex items-center gap-2 text-red-500 mb-6 bg-red-500/10 w-fit px-3 py-1 rounded-full border border-red-500/20 backdrop-blur-sm">
+            <Activity className="h-4 w-4 animate-pulse" />
+            <span className="font-mono text-[10px] tracking-[0.2em] uppercase">
+              Neural Link: Established
             </span>
           </div>
           <motion.div
@@ -217,378 +102,127 @@ export const AuthPage = () => {
             animate={{ opacity: 1, x: 0 }}
             transition={{ delay: 0.2 }}
           >
-            <h1 className="text-5xl font-bold tracking-tighter mb-4 text-white">
-              Global Threat <br />
-              <span className="text-red-500">Intelligence Center</span>
+            <h1 className="text-6xl font-black tracking-tighter mb-4 text-white uppercase italic">
+              ECC-SOC <br />
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-red-600 to-red-400">24/7</span>
             </h1>
-            <p className="text-gray-400 max-w-md text-lg">
-              Advanced telemetry and real-time threat detection for the modern
-              enterprise ecosystem.
+            <p className="text-gray-400 max-w-sm text-sm font-mono leading-relaxed border-l-2 border-red-600 pl-4 py-1">
+              Decentralized cybersecurity intelligence. Monitor, detect, and neutralize threats in zero-latency environments.
             </p>
           </motion.div>
         </div>
 
         <div className="relative z-10 grid grid-cols-2 gap-4 mt-auto">
-          <div className="p-4 rounded-lg bg-white/5 backdrop-blur border border-white/10">
-            <Server className="h-8 w-8 text-red-500 mb-2" />
-            {health ? (
-              <>
-                <div className="text-2xl font-mono font-bold text-white">
-                  {health.live.length + health.dead.length}
-                </div>
-                <div className="text-xs text-gray-400 uppercase tracking-wider">
-                  Total Connectors
-                </div>
-              </>
-            ) : (
-              <>
-                <Skeleton className="h-8 w-16 bg-white/10 mb-1" />
-                <div className="text-xs text-gray-400 uppercase tracking-wider">
-                  Total Connectors
-                </div>
-              </>
-            )}
+          <div className="p-6 rounded-xl bg-black/40 backdrop-blur-xl border border-white/10 group hover:border-red-500/50 transition-all duration-500">
+            <Server className="h-6 w-6 text-red-500 mb-4 group-hover:scale-110 transition-transform" />
+            <div className="text-3xl font-mono font-bold text-white tracking-tighter">--</div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">Active Clusters</div>
           </div>
-          <div className="p-4 rounded-lg bg-white/5 backdrop-blur border border-white/10">
-            <Globe className="h-8 w-8 text-red-500 mb-2" />
-            {health ? (
-              <>
-                <div className="text-2xl font-mono font-bold text-white">
-                  {health.live.length}
-                </div>
-                <div className="text-xs text-gray-400 uppercase tracking-wider">
-                  Nodes Active
-                </div>
-              </>
-            ) : (
-              <>
-                <Skeleton className="h-8 w-16 bg-white/10 mb-1" />
-                <div className="text-xs text-gray-400 uppercase tracking-wider">
-                  Nodes Active
-                </div>
-              </>
-            )}
+          <div className="p-6 rounded-xl bg-black/40 backdrop-blur-xl border border-white/10 group hover:border-red-500/50 transition-all duration-500">
+            <Globe className="h-6 w-6 text-red-500 mb-4 group-hover:scale-110 transition-transform" />
+            <div className="text-3xl font-mono font-bold text-white tracking-tighter">--</div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-widest mt-1">Uplink Nodes</div>
           </div>
         </div>
       </div>
 
-      {/* Right Column - Forms */}
+      {/* Right Column - Form */}
       <div className="relative z-10 flex items-center justify-center p-4 lg:p-12 overflow-y-auto">
         <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="w-full max-w-md relative z-10"
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.6, ease: "easeOut" }}
+          className="w-full max-w-md relative"
         >
-          <div className="mb-8 text-center lg:text-left">
+          {/* Decorative elements for the form */}
+          <div className="absolute -top-10 -right-10 w-40 h-40 bg-red-600/10 blur-[80px] rounded-full" />
+          <div className="absolute -bottom-10 -left-10 w-40 h-40 bg-red-600/10 blur-[80px] rounded-full" />
+
+          <div className="mb-8 text-center lg:text-left relative z-10">
             <div
-              className={`inline-flex items-center justify-center p-3 rounded-full border-2 mb-4 ${isDarkMode ? "bg-black border-red-500 text-red-500" : "bg-white border-red-600 text-red-600"}`}
+              className={`inline-flex items-center justify-center p-4 rounded-2xl border mb-6 bg-black/40 backdrop-blur-xl border-white/10 shadow-[0_0_20px_rgba(220,38,38,0.1)]`}
             >
-              <Shield className="w-8 h-8" />
+              <Shield className="w-8 h-8 text-red-600" />
             </div>
-            <h2 className="text-3xl font-bold tracking-tight">Welcome Back</h2>
-            <p className="text-muted-foreground mt-2">
-              Enter your credentials to access the SOC Dashboard.
+            <h2 className="text-4xl font-bold tracking-tight text-white mb-2 italic uppercase">System Access</h2>
+            <p className="text-gray-400 font-mono text-xs tracking-tight">
+              PROCEED WITH AUTHORIZED CREDENTIALS ONLY
             </p>
           </div>
 
-          <Card className={`border-0 shadow-none bg-transparent`}>
-            <CardContent className="p-0">
-              <Tabs defaultValue="login" className="w-full">
-                <TabsList className="grid w-full grid-cols-2 mb-8 bg-gray-800/50 p-1">
-                  <TabsTrigger
-                    value="login"
-                    className="data-[state=active]:!bg-red-600 data-[state=active]:!text-white data-[state=inactive]:!bg-transparent data-[state=inactive]:text-gray-400 data-[state=inactive]:hover:text-white transition-all"
+          <div className="bg-black/60 backdrop-blur-2xl border border-white/10 rounded-3xl p-8 shadow-2xl relative z-10">
+            <form onSubmit={handleLoginSubmit} className="space-y-5">
+              <div className="space-y-2">
+                <Label htmlFor="username" className="text-[10px] uppercase tracking-widest text-gray-400 ml-1">Operator ID</Label>
+                <div className="relative">
+                  <User className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-red-500/50" />
+                  <Input
+                    id="username"
+                    placeholder="operator_id"
+                    type="text"
+                    autoComplete="off"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    className="pl-12 h-12 bg-white/5 border-white/10 focus:border-red-500/50 focus:ring-red-500/20 rounded-xl transition-all font-mono text-sm"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="password" className="text-[10px] uppercase tracking-widest text-gray-400 ml-1">Access Cipher</Label>
+                <div className="relative">
+                  <Lock className="absolute left-4 top-1/2 -translate-y-1/2 h-4 w-4 text-red-500/50" />
+                  <Input
+                    id="password"
+                    type={showPassword ? "text" : "password"}
+                    placeholder="••••••••"
+                    autoComplete="off"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    className="pl-12 pr-12 h-12 bg-white/5 border-white/10 focus:border-red-500/50 focus:ring-red-500/20 rounded-xl transition-all font-mono text-sm"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white transition-colors"
                   >
-                    Login
-                  </TabsTrigger>
-                  <TabsTrigger
-                    value="register"
-                    className="data-[state=active]:!bg-red-600 data-[state=active]:!text-white data-[state=inactive]:!bg-transparent data-[state=inactive]:text-gray-400 data-[state=inactive]:hover:text-white transition-all"
-                  >
-                    Register
-                  </TabsTrigger>
-                </TabsList>
+                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
 
-                <TabsContent value="login">
-                  <form onSubmit={handleLoginSubmit} className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="email">Email Address</Label>
-                      <div className="relative">
-                        <Mail className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                        <Input
-                          id="email"
-                          placeholder="analyst@eccouncil.org"
-                          type="email"
-                          autoComplete="off"
-                          value={loginEmail}
-                          onChange={(e) => setLoginEmail(e.target.value)}
-                          className={`pl-10 h-11 ${isDarkMode ? "bg-gray-900/50 border-gray-800 focus:border-red-500" : "bg-white border-gray-200 focus:border-red-500"}`}
-                          required
-                        />
-                      </div>
-                    </div>
+              <div className="flex items-center justify-between text-[10px] uppercase tracking-tighter">
+                <label className="flex items-center gap-2 text-gray-500 cursor-pointer group">
+                  <input type="checkbox" className="rounded border-white/10 bg-white/5 text-red-600 focus:ring-red-500/20" />
+                  <span className="group-hover:text-gray-300">Maintain Session</span>
+                </label>
+                <a href="#" className="text-red-500 hover:text-red-400 font-bold transition-colors">Recover Access</a>
+              </div>
 
-                    <div className="space-y-2">
-                      <Label htmlFor="password">Password</Label>
-                      <div className="relative">
-                        <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                        <Input
-                          id="password"
-                          type={showPassword ? "text" : "password"}
-                          placeholder="••••••••"
-                          autoComplete="off"
-                          value={loginPassword}
-                          onChange={(e) => setLoginPassword(e.target.value)}
-                          className={`pl-10 pr-10 h-11 ${isDarkMode ? "bg-gray-900/50 border-gray-800 focus:border-red-500" : "bg-white border-gray-200 focus:border-red-500"}`}
-                          required
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowPassword(!showPassword)}
-                          className="absolute right-3 top-3 text-muted-foreground hover:text-foreground"
-                        >
-                          {showPassword ? (
-                            <EyeOff className="h-4 w-4" />
-                          ) : (
-                            <Eye className="h-4 w-4" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
+              <Button
+                type="submit"
+                className="w-full h-12 bg-red-600 hover:bg-red-500 text-white rounded-xl shadow-[0_0_20px_rgba(220,38,38,0.2)] group relative overflow-hidden transition-all duration-300"
+                disabled={isLoading}
+              >
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+                {isLoading ? (
+                  <span className="font-mono text-xs uppercase tracking-widest">Decrypting...</span>
+                ) : (
+                  <span className="flex items-center justify-center gap-2 font-bold uppercase tracking-widest text-xs">
+                    Initialize Session <ArrowRight className="w-4 h-4" />
+                  </span>
+                )}
+              </Button>
+            </form>
+          </div>
 
-                    <div className="flex items-center justify-between text-sm">
-                      <div className="flex items-center space-x-2">
-                        <input
-                          type="checkbox"
-                          id="remember"
-                          className="rounded border-gray-300 text-red-600 focus:ring-red-500"
-                        />
-                        <label
-                          htmlFor="remember"
-                          className="text-muted-foreground cursor-pointer"
-                        >
-                          Remember me
-                        </label>
-                      </div>
-                      <a
-                        href="#"
-                        className="text-red-500 hover:text-red-400 font-medium transition-colors"
-                      >
-                        Forgot password?
-                      </a>
-                    </div>
-
-                    <Button
-                      type="submit"
-                      className={`w-full h-11 text-base group ${isDarkMode ? "bg-red-600 hover:bg-red-700 text-white" : "bg-red-600 hover:bg-red-700 text-white"}`}
-                      disabled={isLoading}
-                    >
-                      {isLoading ? (
-                        "Authenticating..."
-                      ) : (
-                        <span className="flex items-center justify-center gap-2">
-                          Access Dashboard{" "}
-                          <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
-                        </span>
-                      )}
-                    </Button>
-                  </form>
-                </TabsContent>
-
-                <TabsContent value="register">
-                  <form onSubmit={handleRegisterSubmit} className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <Label htmlFor="firstName">First Name</Label>
-                        <Input
-                          id="firstName"
-                          placeholder="John"
-                          autoComplete="off"
-                          className={`h-11 ${isDarkMode ? "bg-gray-900/50 border-gray-800 focus:border-red-500" : "bg-white border-gray-200 focus:border-red-500"}`}
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="lastName">Last Name</Label>
-                        <Input
-                          id="lastName"
-                          placeholder="Doe"
-                          autoComplete="off"
-                          className={`h-11 ${isDarkMode ? "bg-gray-900/50 border-gray-800 focus:border-red-500" : "bg-white border-gray-200 focus:border-red-500"}`}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="reg-email">Email Address</Label>
-                      <div className="relative">
-                        <Mail className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                        <Input
-                          id="reg-email"
-                          type="email"
-                          placeholder="analyst@eccouncil.org"
-                          autoComplete="off"
-                          value={registerEmail}
-                          onChange={(e) => setRegisterEmail(e.target.value)}
-                          className={`pl-10 h-11 ${isDarkMode ? "bg-gray-900/50 border-gray-800 focus:border-red-500" : "bg-white border-gray-200 focus:border-red-500"}`}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="reg-password">Password</Label>
-                      <div className="relative">
-                        <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                        <Input
-                          id="reg-password"
-                          type={showPassword ? "text" : "password"}
-                          autoComplete="off"
-                          value={registerPassword}
-                          onChange={(e) => setRegisterPassword(e.target.value)}
-                          className={`pl-10 pr-10 h-11 ${isDarkMode ? "bg-gray-900/50 border-gray-800 focus:border-red-500" : "bg-white border-gray-200 focus:border-red-500"}`}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowPassword(!showPassword)}
-                          className="absolute right-3 top-3 text-muted-foreground hover:text-foreground"
-                        >
-                          {showPassword ? (
-                            <EyeOff className="h-4 w-4" />
-                          ) : (
-                            <Eye className="h-4 w-4" />
-                          )}
-                        </button>
-                      </div>
-
-                      {/* Password Strength Indicator */}
-                      {registerPassword && (
-                        <div className="space-y-2 mt-2">
-                          {/* Strength Bar */}
-                          <div className="flex items-center gap-2">
-                            <div className="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                              <div
-                                className={`h-full transition-all duration-300 ${
-                                  passwordStrength === 'weak' ? 'w-1/3 bg-red-500' :
-                                  passwordStrength === 'medium' ? 'w-2/3 bg-yellow-500' :
-                                  passwordStrength === 'strong' ? 'w-full bg-green-500' : 'w-0'
-                                }`}
-                              />
-                            </div>
-                            <span className={`text-xs font-medium ${
-                              passwordStrength === 'weak' ? 'text-red-500' :
-                              passwordStrength === 'medium' ? 'text-yellow-500' :
-                              passwordStrength === 'strong' ? 'text-green-500' : 'text-gray-500'
-                            }`}>
-                              {passwordStrength ? passwordStrength.charAt(0).toUpperCase() + passwordStrength.slice(1) : ''}
-                            </span>
-                          </div>
-
-                          {/* Requirements Checklist */}
-                          {passwordRequirements && (
-                            <div className="grid grid-cols-2 gap-1 text-xs">
-                              <div className={`flex items-center gap-1 ${passwordRequirements.minLength ? 'text-green-500' : 'text-gray-500'}`}>
-                                {passwordRequirements.minLength ? <CheckCircle className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
-                                8+ characters
-                              </div>
-                              <div className={`flex items-center gap-1 ${passwordRequirements.hasUppercase ? 'text-green-500' : 'text-gray-500'}`}>
-                                {passwordRequirements.hasUppercase ? <CheckCircle className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
-                                Uppercase (A-Z)
-                              </div>
-                              <div className={`flex items-center gap-1 ${passwordRequirements.hasLowercase ? 'text-green-500' : 'text-gray-500'}`}>
-                                {passwordRequirements.hasLowercase ? <CheckCircle className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
-                                Lowercase (a-z)
-                              </div>
-                              <div className={`flex items-center gap-1 ${passwordRequirements.hasNumber ? 'text-green-500' : 'text-gray-500'}`}>
-                                {passwordRequirements.hasNumber ? <CheckCircle className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
-                                Number (0-9)
-                              </div>
-                              <div className={`flex items-center gap-1 ${passwordRequirements.hasSpecialChar ? 'text-green-500' : 'text-gray-500'}`}>
-                                {passwordRequirements.hasSpecialChar ? <CheckCircle className="h-3 w-3" /> : <Circle className="h-3 w-3" />}
-                                Special char
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Confirm Password Field */}
-                    <div className="space-y-2">
-                      <Label htmlFor="confirm-password">Confirm Password</Label>
-                      <div className="relative">
-                        <Lock className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                        <Input
-                          id="confirm-password"
-                          type={showPassword ? "text" : "password"}
-                          autoComplete="off"
-                          value={confirmPassword}
-                          onChange={(e) => setConfirmPassword(e.target.value)}
-                          className={`pl-10 pr-10 h-11 ${isDarkMode ? "bg-gray-900/50 border-gray-800 focus:border-red-500" : "bg-white border-gray-200 focus:border-red-500"}`}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowPassword(!showPassword)}
-                          className="absolute right-3 top-3 text-muted-foreground hover:text-foreground"
-                        >
-                          {showPassword ? (
-                            <EyeOff className="h-4 w-4" />
-                          ) : (
-                            <Eye className="h-4 w-4" />
-                          )}
-                        </button>
-                      </div>
-                      {/* Password mismatch indicator */}
-                      {confirmPassword && registerPassword && !passwordsMatch(registerPassword, confirmPassword) && (
-                        <p className="text-xs text-red-500 flex items-center gap-1">
-                          <Circle className="h-3 w-3" />
-                          Passwords do not match
-                        </p>
-                      )}
-                      {confirmPassword && registerPassword && passwordsMatch(registerPassword, confirmPassword) && (
-                        <p className="text-xs text-green-500 flex items-center gap-1">
-                          <CheckCircle className="h-3 w-3" />
-                          Passwords match
-                        </p>
-                      )}
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="role">SOC Role</Label>
-                      <select
-                        id="role"
-                        className={`w-full h-11 px-3 rounded-md text-sm border focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent ${isDarkMode ? "bg-gray-900/50 border-gray-800 text-white" : "bg-white border-gray-200 text-gray-900"}`}
-                      >
-                        <option value="analyst_l1">L1 SOC Analyst</option>
-                        <option value="analyst_l2">L2 SOC Analyst</option>
-                        <option value="incident_responder">
-                          Incident Responder
-                        </option>
-                        <option value="threat_hunter">Threat Hunter</option>
-                        <option value="soc_manager">SOC Manager</option>
-                      </select>
-                    </div>
-
-                    <Button
-                      type="submit"
-                      className={`w-full h-11 text-base group ${isDarkMode ? "bg-red-600 hover:bg-red-700 text-white" : "bg-red-600 hover:bg-red-700 text-white"}`}
-                      disabled={isLoading}
-                    >
-                      {isLoading ? (
-                        "Creating Account..."
-                      ) : (
-                        <span className="flex items-center justify-center gap-2">
-                          Register Analyst <User className="w-4 h-4" />
-                        </span>
-                      )}
-                    </Button>
-                  </form>
-                </TabsContent>
-              </Tabs>
-            </CardContent>
-            <CardFooter className="flex flex-col space-y-2 text-center text-xs text-muted-foreground p-0 mt-8">
-              <p>ECC SOC Dashboard v2.4.0</p>
-            </CardFooter>
-          </Card>
+          <div className="mt-8 text-center">
+            <p className="text-[10px] font-mono text-gray-600 uppercase tracking-[0.3em]">
+              ECC-SOC 24/7 Dashboard <span className="text-red-900">v4.0.0</span>
+            </p>
+          </div>
         </motion.div>
       </div>
     </div>

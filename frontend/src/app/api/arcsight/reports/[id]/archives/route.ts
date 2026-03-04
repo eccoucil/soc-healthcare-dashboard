@@ -1,21 +1,26 @@
 import { getArchivedReports } from "@/lib/arcsight-channel-client";
 import { NextRequest } from "next/server";
+import { withAuthRetry, AuthError } from "@/lib/session";
 
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id } = await params;
-
   try {
-    const archives = await getArchivedReports(id);
-    return Response.json({ archives }, {
-      headers: { "Cache-Control": "no-store" },
+    const { id } = await params;
+    const { data: archives, cookieHeader } = await withAuthRetry(async (auth) => {
+      return getArchivedReports(auth, id);
     });
+    const headers: Record<string, string> = { "Cache-Control": "no-store" };
+    if (cookieHeader) headers["Set-Cookie"] = cookieHeader;
+    return Response.json({ archives }, { headers });
   } catch (error) {
+    if (error instanceof AuthError) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
     const message =
       error instanceof Error ? error.message : "Unknown error";
-    console.error(`[api/reports/${id}/archives]`, message);
+    console.error(`[api/reports/archives]`, message);
     const status =
       message.includes("fetch failed") || message.includes("abort")
         ? 503

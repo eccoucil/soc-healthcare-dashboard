@@ -9,6 +9,7 @@ import {
   Building2,
   ChevronLeft,
   ChevronRight,
+  FolderTree,
   MapPin,
   RefreshCw,
   Search,
@@ -35,6 +36,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { useClients, useConnectorHealth } from "@/hooks/use-arcsight";
 import type { Client } from "@/types/arcsight";
+import { motion } from "motion/react";
 
 type SortKey = "name" | "alias" | "location" | "externalID";
 type SortDir = "asc" | "desc";
@@ -80,9 +82,9 @@ function SortIcon({
     return <ArrowUpDown className="w-3.5 h-3.5 ml-1 opacity-40" />;
   }
   return activeDir === "asc" ? (
-    <ArrowUp className="w-3.5 h-3.5 ml-1" />
+    <ArrowUp className="w-3.5 h-3.5 ml-1 text-red-500" />
   ) : (
-    <ArrowDown className="w-3.5 h-3.5 ml-1" />
+    <ArrowDown className="w-3.5 h-3.5 ml-1 text-red-500" />
   );
 }
 
@@ -156,28 +158,33 @@ export default function ClientsPage() {
   }
 
   return (
-    <>
+    <div className="space-y-8">
       {/* Page Header */}
       <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold">Clients</h2>
-          <p className="text-gray-500">ArcSight ESM client management</p>
+        <div className="relative">
+          <div className="absolute -left-4 top-0 bottom-0 w-1 bg-red-600 rounded-full" />
+          <h2 className="text-4xl font-black tracking-tighter uppercase italic text-white">
+            Client <span className="text-red-600">Database</span>
+          </h2>
+          <p className="text-gray-500 font-mono text-[10px] tracking-[0.3em] uppercase mt-2">
+            Centralized Entity Management
+          </p>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+        <div className="flex items-center gap-4">
+          <div className="relative group">
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 group-focus-within:text-red-500 transition-colors" />
             <Input
-              placeholder="Search clients..."
+              placeholder="SEARCH ENTITIES..."
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              className="w-64 pl-10 bg-white/5 border-white/10 text-white placeholder:text-gray-500"
+              className="w-80 h-11 pl-12 bg-white/5 border-white/5 text-white placeholder:text-gray-600 rounded-xl focus:border-red-500/50 focus:ring-red-500/20 transition-all font-mono text-xs tracking-widest"
             />
           </div>
           <Button
             variant="ghost"
             size="icon"
             onClick={refetch}
-            className="text-gray-400 hover:text-white"
+            className="h-11 w-11 rounded-xl bg-white/5 border border-white/5 hover:bg-white/10 text-gray-400 hover:text-white transition-all"
           >
             <RefreshCw className="w-4 h-4" />
           </Button>
@@ -186,97 +193,85 @@ export default function ClientsPage() {
 
       {/* Error banner */}
       {error && (
-        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
-          <TriangleAlert className="w-4 h-4 text-red-400 shrink-0" />
-          <p className="text-sm text-red-300">
-            API error: {error}
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="flex items-center gap-3 px-6 py-4 rounded-2xl bg-red-950/20 border border-red-500/20 shadow-[0_0_20px_rgba(239,68,68,0.1)]"
+        >
+          <TriangleAlert className="w-5 h-5 text-red-500 shrink-0" />
+          <p className="text-xs font-mono text-red-400 uppercase tracking-widest">
+            Critical Access Error: {error}
           </p>
-        </div>
+        </motion.div>
       )}
 
       {/* Stats Summary */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card className="bg-[#12121a] border-white/10">
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-gray-400">
-              Total Clients
-            </CardTitle>
-            <Building2 className="w-5 h-5 text-blue-500" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <Skeleton className="h-9 w-16 bg-white/10" />
-            ) : (
-              <div className="text-3xl font-bold text-white">
-                {displayData.length || "—"}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {[
+          { title: "Total Entities", icon: Building2, color: "text-blue-500", value: displayData.length || "—", loading: isLoading },
+          { title: "Localized", icon: MapPin, color: "text-green-500", value: clientsWithLocation, loading: isLoading },
+          { title: "Active Uplinks", icon: Server, color: "text-red-500", value: health?.live.length || "—", loading: !health }
+        ].map((item, idx) => (
+          <motion.div
+            key={item.title}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: idx * 0.1 }}
+          >
+            <Card className="bg-black/40 backdrop-blur-2xl border-white/5 hover:border-red-500/30 transition-all duration-500 group relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
+                <item.icon className="w-20 h-20 -mr-6 -mt-6" />
               </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="bg-[#12121a] border-white/10">
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-gray-400">
-              With Location
-            </CardTitle>
-            <MapPin className="w-5 h-5 text-green-500" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <Skeleton className="h-9 w-16 bg-white/10" />
-            ) : (
-              <div className="text-3xl font-bold text-white">
-                {clientsWithLocation}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="bg-[#12121a] border-white/10">
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-gray-400">
-              Active Connectors
-            </CardTitle>
-            <Server className="w-5 h-5 text-purple-500" />
-          </CardHeader>
-          <CardContent>
-            {health ? (
-              <div className="text-3xl font-bold text-white">
-                {health.live.length}
-              </div>
-            ) : (
-              <Skeleton className="h-9 w-16 bg-white/10" />
-            )}
-          </CardContent>
-        </Card>
+              <CardHeader className="flex flex-row items-center justify-between pb-2 relative z-10">
+                <CardTitle className="text-[10px] font-mono font-bold text-gray-500 uppercase tracking-[0.2em]">
+                  {item.title}
+                </CardTitle>
+                <item.icon className={`w-4 h-4 ${item.color} opacity-70`} />
+              </CardHeader>
+              <CardContent className="relative z-10">
+                {item.loading ? (
+                  <Skeleton className="h-10 w-24 bg-white/5" />
+                ) : (
+                  <div className="text-4xl font-black tracking-tighter text-white">
+                    {item.value}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </motion.div>
+        ))}
       </div>
 
       {/* Client Directory */}
-      <Card className="bg-[#12121a] border-white/10">
-        <CardHeader>
-          <CardTitle className="text-white">Client Directory</CardTitle>
-          <CardDescription className="text-gray-500">
-            Click a client to view connectors and devices
-          </CardDescription>
+      <Card className="bg-black/40 backdrop-blur-2xl border-white/5 rounded-3xl overflow-hidden shadow-2xl">
+        <CardHeader className="border-b border-white/5 px-8 py-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-xl font-black uppercase italic tracking-tight text-white">Entity Registry</CardTitle>
+              <CardDescription className="text-gray-500 font-mono text-[10px] tracking-widest uppercase mt-1">
+                Select an entry for granular device telemetry
+              </CardDescription>
+            </div>
+          </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="p-0">
           {isLoading ? (
-            <div className="space-y-3">
+            <div className="p-8 space-y-4">
               {Array.from({ length: 5 }).map((_, i) => (
-                <Skeleton key={i} className="h-12 w-full bg-white/10" />
+                <Skeleton key={i} className="h-14 w-full bg-white/5 rounded-xl" />
               ))}
             </div>
           ) : paginated.length > 0 ? (
-            <>
+            <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
-                  <TableRow className="border-white/10 hover:bg-transparent">
+                  <TableRow className="border-white/5 hover:bg-transparent px-8">
                     <TableHead
-                      className="text-gray-500 cursor-pointer select-none hover:text-gray-300 transition-colors"
+                      className="text-[10px] font-mono uppercase tracking-widest text-gray-500 cursor-pointer select-none hover:text-white transition-colors pl-8 py-4"
                       onClick={() => handleSort("name")}
                     >
                       <span className="inline-flex items-center">
-                        Name
+                        Identifier
                         <SortIcon
                           column="name"
                           activeKey={sortKey}
@@ -285,7 +280,7 @@ export default function ClientsPage() {
                       </span>
                     </TableHead>
                     <TableHead
-                      className="text-gray-500 cursor-pointer select-none hover:text-gray-300 transition-colors"
+                      className="text-[10px] font-mono uppercase tracking-widest text-gray-500 cursor-pointer select-none hover:text-white transition-colors py-4"
                       onClick={() => handleSort("alias")}
                     >
                       <span className="inline-flex items-center">
@@ -298,11 +293,11 @@ export default function ClientsPage() {
                       </span>
                     </TableHead>
                     <TableHead
-                      className="text-gray-500 cursor-pointer select-none hover:text-gray-300 transition-colors"
+                      className="text-[10px] font-mono uppercase tracking-widest text-gray-500 cursor-pointer select-none hover:text-white transition-colors py-4"
                       onClick={() => handleSort("location")}
                     >
                       <span className="inline-flex items-center">
-                        Location
+                        Geospatial
                         <SortIcon
                           column="location"
                           activeKey={sortKey}
@@ -311,11 +306,11 @@ export default function ClientsPage() {
                       </span>
                     </TableHead>
                     <TableHead
-                      className="text-gray-500 cursor-pointer select-none hover:text-gray-300 transition-colors"
+                      className="text-[10px] font-mono uppercase tracking-widest text-gray-500 cursor-pointer select-none hover:text-white transition-colors py-4"
                       onClick={() => handleSort("externalID")}
                     >
                       <span className="inline-flex items-center">
-                        External ID
+                        Secure ID
                         <SortIcon
                           column="externalID"
                           activeKey={sortKey}
@@ -323,39 +318,44 @@ export default function ClientsPage() {
                         />
                       </span>
                     </TableHead>
-                    <TableHead className="text-gray-500 w-10" />
+                    <TableHead className="text-gray-500 w-10 pr-8" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {paginated.map((client) => (
                     <TableRow
                       key={client.resourceId}
-                      className="border-white/10 hover:bg-white/5"
+                      className="border-white/5 hover:bg-red-600/5 transition-colors group cursor-pointer"
                     >
-                      <TableCell>
-                        <Link
-                          href={`/dashboard/clients/${encodeURIComponent(client.resourceId)}`}
-                          className="text-white font-medium hover:text-red-400 transition-colors"
-                        >
-                          {client.name}
-                        </Link>
+                      <TableCell className="pl-8 py-5">
+                        <div className="flex items-center gap-2">
+                          <Link
+                            href={`/dashboard/clients/${encodeURIComponent(client.resourceId)}`}
+                            className="text-sm font-bold text-white group-hover:text-red-500 transition-colors uppercase tracking-tight italic"
+                          >
+                            {client.name}
+                          </Link>
+                          {client._source === "tree" && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-500/70 text-[8px] font-mono font-bold uppercase tracking-widest" title="Discovered from channel tree (not a registered Customer resource)">
+                              <FolderTree className="w-2.5 h-2.5" />
+                              Tree
+                            </span>
+                          )}
+                        </div>
                       </TableCell>
-                      <TableCell className="text-gray-400">
+                      <TableCell className="text-xs text-gray-400 font-mono">
                         {client.alias || "—"}
                       </TableCell>
-                      <TableCell className="text-gray-400">
+                      <TableCell className="text-xs text-gray-500 font-mono">
                         {formatLocation(client)}
                       </TableCell>
-                      <TableCell className="font-mono text-sm text-gray-500">
+                      <TableCell className="font-mono text-[10px] text-gray-600 group-hover:text-gray-400 transition-colors">
                         {client.externalID || "—"}
                       </TableCell>
-                      <TableCell>
-                        <Link
-                          href={`/dashboard/clients/${encodeURIComponent(client.resourceId)}`}
-                          className="text-gray-500 hover:text-white transition-colors"
-                        >
+                      <TableCell className="pr-8 text-right">
+                        <div className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-white/5 border border-white/5 group-hover:border-red-500/50 group-hover:text-red-500 transition-all">
                           <ChevronRight className="w-4 h-4" />
-                        </Link>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -364,13 +364,13 @@ export default function ClientsPage() {
 
               {/* Pagination */}
               {sorted.length > PAGE_SIZE && (
-                <div className="flex items-center justify-between pt-4 border-t border-white/10 mt-4">
-                  <p className="text-sm text-gray-500">
+                <div className="flex items-center justify-between px-8 py-6 border-t border-white/5 bg-black/20">
+                  <p className="text-[10px] font-mono text-gray-600 uppercase tracking-widest">
                     Showing {(currentPage - 1) * PAGE_SIZE + 1}–
                     {Math.min(currentPage * PAGE_SIZE, sorted.length)} of{" "}
-                    {sorted.length}
+                    {sorted.length} RECORDS
                   </p>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-3">
                     <Button
                       variant="ghost"
                       size="sm"
@@ -378,14 +378,14 @@ export default function ClientsPage() {
                       onClick={() =>
                         setCurrentPage((p) => Math.max(1, p - 1))
                       }
-                      className="text-gray-400 hover:text-white disabled:opacity-30"
+                      className="h-9 px-4 rounded-xl bg-white/5 border border-white/5 text-[10px] font-bold uppercase tracking-widest text-gray-500 hover:text-white disabled:opacity-20 transition-all"
                     >
-                      <ChevronLeft className="w-4 h-4 mr-1" />
-                      Previous
+                      <ChevronLeft className="w-3 h-3 mr-2" />
+                      Prev
                     </Button>
-                    <span className="text-sm text-gray-500 px-2">
-                      Page {currentPage} of {totalPages}
-                    </span>
+                    <div className="text-[10px] font-mono font-bold text-red-600 px-4 h-9 flex items-center justify-center rounded-xl bg-red-600/5 border border-red-600/10">
+                      {currentPage} / {totalPages}
+                    </div>
                     <Button
                       variant="ghost"
                       size="sm"
@@ -393,24 +393,24 @@ export default function ClientsPage() {
                       onClick={() =>
                         setCurrentPage((p) => Math.min(totalPages, p + 1))
                       }
-                      className="text-gray-400 hover:text-white disabled:opacity-30"
+                      className="h-9 px-4 rounded-xl bg-white/5 border border-white/5 text-[10px] font-bold uppercase tracking-widest text-gray-500 hover:text-white disabled:opacity-20 transition-all"
                     >
                       Next
-                      <ChevronRight className="w-4 h-4 ml-1" />
+                      <ChevronRight className="w-3 h-3 ml-2" />
                     </Button>
                   </div>
                 </div>
               )}
-            </>
+            </div>
           ) : (
-            <div className="text-center py-12 text-gray-500">
+            <div className="text-center py-24 text-gray-600 font-mono text-sm uppercase tracking-widest">
               {debouncedSearch
-                ? `No clients matching "${debouncedSearch}"`
-                : "No clients found"}
+                ? `Zero Results for Identity Query: "${debouncedSearch}"`
+                : "Registry empty"}
             </div>
           )}
         </CardContent>
       </Card>
-    </>
+    </div>
   );
 }

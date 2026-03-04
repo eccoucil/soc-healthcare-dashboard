@@ -6,9 +6,9 @@ import {
   ChevronRight,
   FolderOpen,
   MonitorSmartphone,
-  Radio,
-  X,
+  RefreshCw,
   Loader2,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -19,23 +19,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Sheet,
   SheetContent,
-  SheetHeader,
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Skeleton } from "@/components/ui/skeleton";
-import { useClientTree, useChannelEventsOnDemand } from "@/hooks/use-arcsight";
+  useClientTree,
+  useChannelScan,
+  useEventDetailsForChannel,
+} from "@/hooks/use-arcsight";
 
 // --- Types ---
 
@@ -52,85 +47,345 @@ interface DeviceGroup {
   devices: DeviceEntry[];
 }
 
+interface ScanInfo {
+  hasEvents: boolean;
+  eventCount: number;
+  latestManagerReceiptTime: number | null;
+  firstEventId?: number;
+  eventFields?: Record<string, string | number | null>;
+}
+
 // --- Helpers ---
 
-function isDeviceActive(lastUpdate: string | null): boolean {
-  if (!lastUpdate) return false;
-  const age = Date.now() - new Date(lastUpdate).getTime();
-  return !isNaN(age) && age <= 7 * 24 * 60 * 60 * 1000; // 7 days
+type HealthStatus = "healthy" | "unhealthy";
+type HealthSource = "scan" | "estimated";
+
+interface HealthResult {
+  status: HealthStatus;
+  source: HealthSource;
 }
 
-// Column ordering: preferred columns first (matching ArcSight's event viewer), then remaining alphabetically
-const PREFERRED_COLUMNS = [
-  "managerReceiptTime",
-  "name",
-  "attackerAddress",
-  "targetAddress",
-  "priority",
-  "deviceVendor",
-  "deviceProduct",
-];
+const HEALTH_THRESHOLD_MS = 10 * 60_000; // 10 minutes
 
-function orderFields(fieldNames: string[]): string[] {
-  return [
-    ...PREFERRED_COLUMNS.filter((f) => fieldNames.includes(f)),
-    ...fieldNames.filter((f) => !PREFERRED_COLUMNS.includes(f)).sort(),
-  ];
+function getDeviceHealth(
+  lastUpdateTime: string | null,
+  scanInfo?: ScanInfo,
+  scanInProgress?: boolean
+): HealthResult {
+  // Primary: scan results with managerReceiptTime (actual event flow)
+  if (scanInfo !== undefined) {
+    if (scanInfo.latestManagerReceiptTime !== null) {
+      const age = Date.now() - scanInfo.latestManagerReceiptTime;
+      return {
+        status: age <= HEALTH_THRESHOLD_MS ? "healthy" : "unhealthy",
+        source: "scan",
+      };
+    }
+    // Scan found events but couldn't extract a timestamp — assume active
+    if (scanInfo.hasEvents) {
+      return { status: "healthy", source: "scan" };
+    }
+    // Inconclusive: scan got 0 events and no MRT. The subscription may not
+    // have warmed up in time (cold-start issue for slow channels). Don't
+    // claim "confirmed inactive" — fall through to tree metadata estimate.
+  }
+  // While scan is in-flight and no cached data exists yet, show neutral
+  // "estimated healthy" instead of stale metadata check that would mark all red
+  if (scanInProgress) {
+    return { status: "healthy", source: "estimated" };
+  }
+  // Fallback: metadata timestamp (pre-scan estimate)
+  if (!lastUpdateTime) return { status: "unhealthy", source: "estimated" };
+  const age = Date.now() - new Date(lastUpdateTime).getTime();
+  return {
+    status: isNaN(age) || age > HEALTH_THRESHOLD_MS ? "unhealthy" : "healthy",
+    source: "estimated",
+  };
 }
 
-function formatFieldName(name: string): string {
-  return name
-    .replace(/([A-Z])/g, " $1")
-    .trim()
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+// --- Helpers ---
+
+function formatTimestamp(value: string | number | null | undefined): string {
+  if (value == null) return "—";
+  const ms = typeof value === "number" ? value : Number(value);
+  if (!isNaN(ms) && ms > 0) return new Date(ms).toLocaleString();
+  const parsed = new Date(String(value));
+  return isNaN(parsed.getTime()) ? "—" : parsed.toLocaleString();
 }
 
-function formatCellValue(value: string | number | null): string {
-  if (value == null) return "\u2014";
-  if (typeof value === "number" && value > 1_000_000_000_000)
-    return new Date(value).toLocaleString();
-  return String(value);
+function MetadataRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="px-4 py-2.5 border-b border-white/5 last:border-b-0">
+      <p className="text-[11px] font-medium uppercase tracking-wider text-gray-500 mb-0.5">
+        {label}
+      </p>
+      <p className="text-sm text-gray-200 break-words">{value}</p>
+    </div>
+  );
 }
 
-// Format epoch ms or ISO string → "21 Feb 2026, Sat 11:52"
-function formatEventTimestamp(val: string | number | null): string {
-  if (val == null) return "\u2014";
-  const d = typeof val === "number" ? new Date(val) : new Date(val);
-  if (isNaN(d.getTime())) return String(val);
-  return d.toLocaleDateString("en-GB", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    weekday: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+// --- Device Detail Panel ---
 
-// ArcSight priority is numeric (1-10) — map to severity colors
-function getPriorityColor(val: string | number | null): string {
-  const n = typeof val === "number" ? val : parseInt(String(val));
-  if (isNaN(n)) return "text-gray-400";
-  if (n >= 8) return "text-red-400"; // Critical
-  if (n >= 6) return "text-orange-400"; // High
-  if (n >= 4) return "text-yellow-400"; // Medium
-  return "text-blue-400"; // Low
+function DeviceDetailPanel({
+  device,
+  clientName,
+  onClose,
+  scanInfo,
+}: {
+  device: DeviceEntry | null;
+  clientName: string | null;
+  onClose: () => void;
+  scanInfo?: ScanInfo;
+}) {
+  const { channelData, eventDetails, isLoading, isLoadingDetails, error, detailsError } =
+    useEventDetailsForChannel(device?.resourceId ?? null, scanInfo?.firstEventId);
+
+  const loading = isLoading || isLoadingDetails;
+  const isFilterOnly = channelData?.isFilterExpressionOnly ?? false;
+  
+  // Field resolution: eventDetails → channelData → fallback
+  const ev = eventDetails?.events?.[0];
+  const ch = channelData?.events?.[0];
+
+  const hasScanData = scanInfo?.eventFields != null && Object.keys(scanInfo.eventFields).length > 0;
+  const hasInferredData = (ev != null || ch != null) && isFilterOnly && !hasScanData;
+  const hasEventData = ev != null || ch != null || hasScanData;
+
+  // Debug: log data sources available for field resolution
+  if (device && !loading) {
+    console.log(
+      `[device-panel] Data sources: ev=${ev ? Object.keys(ev.fields || {}).length + " fields" : "null"}, ` +
+      `ch=${ch ? Object.keys(ch.fields || {}).length + " fields" : "null"}, ` +
+      `scanInfo=${scanInfo?.eventFields ? Object.keys(scanInfo.eventFields).length + " fields" : "null"}`
+    );
+  }
+
+  function field(key: string | string[]): string {
+    const keys = Array.isArray(key) ? key : [key];
+    for (const k of keys) {
+      const value = ev?.fields?.[k]?.value ?? ch?.fields?.[k] ?? scanInfo?.eventFields?.[k] ?? null;
+      if (value !== null && value !== undefined && value !== "") {
+        return String(value);
+      }
+    }
+    return "—";
+  }
+
+  // Last Log Received — prefer scan's server-decoded latestManagerReceiptTime,
+  // then check live channel data, then metadata fallback.
+  const { lastLog, lastLogSource } = (() => {
+    // Priority 1: Scan result — most reliable because the server-side
+    // extractLatestManagerReceiptTime() handles all GWT encoding formats
+    // (number, numeric string, base-64 Long).
+    if (scanInfo?.latestManagerReceiptTime != null)
+      return { lastLog: formatTimestamp(scanInfo.latestManagerReceiptTime), lastLogSource: "scan" as const };
+
+    // Priority 2: Live channel/event data (may contain GWT-encoded values
+    // that toMs can't parse, so only use when scan data is unavailable)
+    let latestMs = 0;
+
+    const toMs = (v: string | number | null | undefined) => {
+      // Explicit null/undefined check
+      if (v === null || v === undefined || v === "null" || v === "undefined") return 0;
+
+      if (typeof v === "number") return v > 0 ? v : 0;
+
+      if (typeof v === "string") {
+        const trimmed = v.trim();
+        if (trimmed === "" || trimmed === "null" || trimmed === "undefined") return 0;
+        const n = Number(trimmed);
+        return isNaN(n) || n <= 0 ? 0 : n;
+      }
+
+      return 0;
+    };
+
+    channelData?.events.forEach(e => {
+      const ts = toMs(e.fields["managerReceiptTime"]);
+      if (ts > latestMs) latestMs = ts;
+    });
+
+    eventDetails?.events.forEach(e => {
+      const ts = toMs(e.fields["managerReceiptTime"]?.value);
+      if (ts > latestMs) latestMs = ts;
+    });
+
+    if (latestMs > 0) return { lastLog: formatTimestamp(latestMs), lastLogSource: "live" as const };
+
+    // No reliable timestamp available
+    return { lastLog: "—", lastLogSource: "none" as const };
+  })();
+
+  // Debug: log all intermediate values for the selected device
+  if (device) {
+    console.log(`[device-panel] "${device.displayName}" lastLog sources:`, {
+      scanMrt: scanInfo?.latestManagerReceiptTime ?? "null",
+      scanHasEvents: scanInfo?.hasEvents,
+      scanEventCount: scanInfo?.eventCount,
+      liveEventCount: channelData?.events?.length ?? 0,
+      liveFirstMrt: channelData?.events?.[0]?.fields?.["managerReceiptTime"] ?? "null",
+      detailMrt: eventDetails?.events?.[0]?.fields?.["managerReceiptTime"]?.value ?? "null",
+      // Removed: metadataLastUpdate (no longer used)
+      selectedSource: lastLogSource,
+      displayedValue: lastLog,
+      reason: lastLogSource === "none" ? "No scan/live data available" : "Got timestamp"
+    });
+  }
+
+  // Channel subscription cold-start: data returned but 0 events yet
+  const channelWarming = !isLoading && channelData != null && channelData.events.length === 0 && !error;
+
+  return (
+    <Sheet open={device !== null} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent
+        side="right"
+        showCloseButton={false}
+        className="bg-[#0a0a0f] border-white/10 w-[400px] sm:max-w-[400px] p-0 flex flex-col"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-[#12121a] shrink-0">
+          <div className="min-w-0">
+            <SheetTitle className="text-sm font-semibold text-white truncate">
+              {device?.displayName ?? "Device"}
+            </SheetTitle>
+            <SheetDescription className="text-xs text-gray-500 mt-0.5 truncate">
+              {device?.groupName ?? ""}
+            </SheetDescription>
+          </div>
+          <button
+            onClick={onClose}
+            className="shrink-0 ml-3 p-1.5 rounded-md text-gray-400 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Content Area */}
+        <div className="flex-1 relative overflow-y-auto">
+          {/* Loading Modal Overlay */}
+          {loading && !hasEventData && !channelWarming && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center p-6 bg-[#0a0a0f]/95 backdrop-blur-sm">
+              <div className="bg-[#12121a] border border-white/10 rounded-xl p-8 shadow-2xl flex flex-col items-center max-w-[280px] w-full animate-in fade-in zoom-in duration-300">
+                <Loader2 className="w-12 h-12 text-blue-500 animate-spin mb-6" />
+                <p className="text-sm text-gray-200 font-medium text-center leading-relaxed">
+                  Fetching the information from the event log
+                </p>
+                <p className="text-[11px] text-gray-500 mt-2 text-center">
+                  Connecting to ArcSight ESM server...
+                </p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={onClose}
+                  className="mt-6 text-gray-500 hover:text-white"
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Body */}
+          <div className="py-2">
+            {(error || detailsError) && (
+              <div className="mx-4 my-2 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
+                {error && <p>{error}</p>}
+                {detailsError && !error && (
+                   <p className="text-[10px] opacity-70 mt-1">
+                     Full details unavailable. Showing live stream fields only.
+                   </p>
+                )}
+              </div>
+            )}
+
+            {hasInferredData && (
+              <div className="mx-3 my-2 px-3 py-2 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-200 text-xs flex items-center gap-2">
+                <Activity className="w-4 h-4 shrink-0 text-amber-500" />
+                <p>Device is currently inactive. Showing inferred configuration data.</p>
+              </div>
+            )}
+
+            {channelWarming && !hasEventData && (
+            <div className="px-4 py-8 text-center">
+              <Loader2 className="w-8 h-8 text-gray-500 mx-auto mb-2 animate-spin" />
+              <p className="text-sm text-gray-400">Channel loading&hellip;</p>
+              <p className="text-xs text-gray-600 mt-1">
+                Subscription warming up — events will appear shortly
+              </p>
+            </div>
+          )}
+
+          {!loading && !channelWarming && !hasEventData && !error && (
+            <div className="px-4 py-8 text-center">
+              <MonitorSmartphone className="w-8 h-8 text-gray-600 mx-auto mb-2" />
+              <p className="text-sm text-gray-500">No event data available</p>
+              <p className="text-xs text-gray-600 mt-1">
+                This channel has no recent events to display
+              </p>
+            </div>
+          )}
+
+          {hasEventData && (
+            <div className="bg-[#12121a] rounded-lg mx-3 my-2 border border-white/5">
+              <MetadataRow label="Customer Name" value={field("customerName") !== "Waiting for events..." && field("customerName") !== "—" ? field("customerName") : (clientName ?? "—")} />
+              <MetadataRow
+                label="Active Channel Name"
+                value={device?.displayName ?? "—"}
+              />
+              <MetadataRow
+                label="Device Vendor"
+                value={field(["deviceVendor", "agentType"])}
+              />
+              <MetadataRow
+                label="Device Product"
+                value={field(["deviceProduct", "name", "message"])}
+              />
+              <MetadataRow
+                label={
+                  lastLogSource === "none"
+                    ? "LAST LOG RECEIVED (NO DATA)"
+                    : lastLogSource === "live"
+                    ? "LAST LOG RECEIVED (LIVE)"
+                    : "LAST LOG RECEIVED"
+                }
+                value={lastLog}
+              />
+
+              {/* Scan status indicators */}
+              {!scanInfo && !hasEventData && (
+                <div className="text-xs text-blue-500/70 mt-2 px-3 flex items-center gap-2">
+                  <RefreshCw className="h-3 w-3" />
+                  <span>Waiting for scan data... Try the Refresh Scan button.</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </SheetContent>
+  </Sheet>
+  );
 }
 
 // --- Device Circle ---
 
 function DeviceCircle({
   device,
+  scanInfo,
+  scanInProgress,
   onClick,
 }: {
   device: DeviceEntry;
-  onClick: () => void;
+  scanInfo?: ScanInfo;
+  scanInProgress?: boolean;
+  onClick?: () => void;
 }) {
-  const active = isDeviceActive(device.lastUpdateTime);
+  const { status: health, source } = getDeviceHealth(device.lastUpdateTime, scanInfo, scanInProgress);
+  const isEstimated = source === "estimated";
 
   return (
-    <div className="flex flex-col items-center gap-2">
-      <div className="relative group">
+    <div className="flex flex-col items-center gap-2 group">
+      <div className="relative">
         <div
           role="button"
           tabIndex={0}
@@ -138,27 +393,32 @@ function DeviceCircle({
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
-              onClick();
+              onClick?.();
             }
           }}
-          className="w-20 h-20 rounded-full bg-[#1a1a28] ring-2 ring-white/10 flex items-center justify-center cursor-pointer transition-all group-hover:ring-white/30 group-hover:bg-[#1e1e30] focus-visible:outline-none focus-visible:ring-white/50"
+          className="w-20 h-20 rounded-full bg-[#1a1a28] ring-2 ring-white/10 flex items-center justify-center cursor-pointer group-hover:ring-white/30 group-hover:bg-[#1e1e30] focus-visible:ring-white/50 focus-visible:outline-none transition-all"
         >
           <MonitorSmartphone className="w-7 h-7 text-gray-400" />
         </div>
         {/* Activity dot */}
         <div
-          className={`absolute bottom-0 right-0 w-3 h-3 rounded-full ring-2 ring-[#0a0a0f] ${
-            active ? "bg-green-500" : "bg-red-500"
-          }`}
-          title={active ? "Active (updated within 7 days)" : "Inactive"}
+          className={`absolute bottom-0 right-0 w-3 h-3 rounded-full ring-2 ring-[#0a0a0f] transition-opacity ${
+            health === "healthy" ? "bg-green-500" : "bg-red-500"
+          } ${isEstimated ? "opacity-50" : ""}`}
+          title={
+            health === "healthy"
+              ? `Active (${isEstimated ? "estimated" : "confirmed"})`
+              : `Inactive (${isEstimated ? "estimated" : "confirmed"})`
+          }
         />
       </div>
       <span
-        className={`text-[10px] font-medium ${
-          active ? "text-green-400" : "text-red-400"
-        }`}
+        className={`text-[10px] font-medium transition-opacity ${
+          health === "healthy" ? "text-green-400" : "text-red-400"
+        } ${isEstimated ? "opacity-60" : ""}`}
       >
-        {active ? "Active" : "Inactive"}
+        {health === "healthy" ? "Active" : "Inactive"}
+        {isEstimated ? "*" : ""}
       </span>
       <span className="text-xs text-gray-300 max-w-[100px] text-center line-clamp-2">
         {device.displayName}
@@ -174,14 +434,18 @@ function DeviceCircle({
 
 function DeviceGroupSection({
   group,
+  scanMap,
+  scanInProgress,
   onSelectDevice,
 }: {
   group: DeviceGroup;
-  onSelectDevice: (d: DeviceEntry) => void;
+  scanMap?: Map<string, ScanInfo>;
+  scanInProgress?: boolean;
+  onSelectDevice?: (d: DeviceEntry) => void;
 }) {
   const [expanded, setExpanded] = useState(true);
-  const active = group.devices.filter((d) =>
-    isDeviceActive(d.lastUpdateTime)
+  const active = group.devices.filter(
+    (d) => getDeviceHealth(d.lastUpdateTime, scanMap?.get(d.resourceId), scanInProgress).status === "healthy"
   ).length;
   const inactive = group.devices.length - active;
 
@@ -221,7 +485,9 @@ function DeviceGroupSection({
               <DeviceCircle
                 key={d.resourceId}
                 device={d}
-                onClick={() => onSelectDevice(d)}
+                scanInfo={scanMap?.get(d.resourceId)}
+                scanInProgress={scanInProgress}
+                onClick={() => onSelectDevice?.(d)}
               />
             ))}
           </div>
@@ -231,251 +497,61 @@ function DeviceGroupSection({
   );
 }
 
-// --- Device Event Sheet ---
-
-function renderCellValue(
-  fieldName: string,
-  value: string | number | null
-): React.ReactNode {
-  if (fieldName === "managerReceiptTime") return formatEventTimestamp(value);
-  if (fieldName === "priority") {
-    return (
-      <span className={`font-medium ${getPriorityColor(value)}`}>
-        {value == null ? "\u2014" : String(value)}
-      </span>
-    );
-  }
-  return formatCellValue(value);
-}
-
-function DeviceEventSheet({
-  device,
-  clientName,
-  onClose,
-}: {
-  device: DeviceEntry | null;
-  clientName: string | null;
-  onClose: () => void;
-}) {
-  const { data, isLoading, error } = useChannelEventsOnDemand(
-    device?.resourceId ?? null
-  );
-
-  const orderedFields = useMemo(
-    () => (data ? orderFields(data.fieldNames) : []),
-    [data]
-  );
-
-  return (
-    <Sheet open={!!device} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent
-        side="right"
-        className="w-[900px] sm:max-w-[900px] bg-[#0a0a0f] border-white/10 flex flex-col overflow-hidden p-0"
-      >
-        {/* Header */}
-        <div className="shrink-0 px-6 pt-6 pb-4 border-b border-white/10">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <MonitorSmartphone className="w-5 h-5 text-gray-400" />
-              <SheetTitle className="text-white text-lg font-semibold">
-                {device?.displayName ?? "Device"}
-              </SheetTitle>
-            </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={onClose}
-              className="text-gray-400 hover:text-white -mr-2"
-            >
-              <X className="w-4 h-4" />
-            </Button>
-          </div>
-          <SheetDescription className="sr-only">
-            Live events from device {device?.displayName}
-          </SheetDescription>
-
-          {device && (
-            <div className="flex items-center gap-2 mt-3 flex-wrap">
-              <Badge
-                variant="outline"
-                className="bg-purple-500/15 text-purple-400 border-purple-500/20 text-xs"
-              >
-                {device.groupName}
-              </Badge>
-              {device.subType && (
-                <Badge
-                  variant="outline"
-                  className="text-xs text-gray-400 border-white/10"
-                >
-                  {device.subType}
-                </Badge>
-              )}
-
-              {/* Status indicator */}
-              {isLoading ? (
-                <Badge
-                  variant="outline"
-                  className="bg-yellow-500/10 text-yellow-400 border-yellow-500/20 text-xs"
-                >
-                  <Loader2 className="w-3 h-3 animate-spin mr-1" />
-                  Loading...
-                </Badge>
-              ) : data ? (
-                <Badge
-                  variant="outline"
-                  className="bg-green-500/10 text-green-400 border-green-500/20 text-xs"
-                >
-                  <Radio className="w-3 h-3 mr-1" />
-                  Channel Loaded
-                </Badge>
-              ) : null}
-
-              {data && (
-                <Badge
-                  variant="outline"
-                  className="bg-blue-500/15 text-blue-400 border-blue-500/20 text-xs ml-auto"
-                >
-                  Total Events = {data.totalCount}
-                </Badge>
-              )}
-            </div>
-          )}
-
-          {data && (
-            <p className="text-[11px] text-gray-600 mt-2">
-              Auto-refreshes every 10 seconds
-            </p>
-          )}
-        </div>
-
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto flex flex-col px-6 py-4 min-h-0">
-          {error && (
-            <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20 mb-4 shrink-0">
-              <Activity className="w-4 h-4 text-red-400 shrink-0" />
-              <p className="text-sm text-red-300">{error}</p>
-            </div>
-          )}
-
-          {/* Metadata detail card — always visible */}
-          {device && (
-            <div className="shrink-0 rounded-lg border border-white/10 bg-[#12121a] mb-4">
-              <div className="grid grid-cols-2 gap-px bg-white/5">
-                {(() => {
-                  const firstEvent = data?.events?.[0];
-                  const field = (key: string) => {
-                    const v = firstEvent?.fields?.[key];
-                    return v != null ? String(v) : "\u2014";
-                  };
-                  const rows = [
-                    ["Client Name", clientName ?? "\u2014"],
-                    ["Active Channel Name", device.displayName],
-                    ["Agent Name", field("agentName")],
-                    ["Agent Address", field("agentAddress")],
-                    ["Agent Host Name", field("agentHostName")],
-                    ["Device Vendor", field("deviceVendor")],
-                    ["Device Product", field("deviceProduct")],
-                    [
-                      "Last Log Received",
-                      device.lastUpdateTime
-                        ? formatEventTimestamp(device.lastUpdateTime)
-                        : "\u2014",
-                    ],
-                  ];
-                  return rows.map(([label, value]) => (
-                    <div
-                      key={label}
-                      className="bg-[#12121a] px-4 py-2.5 flex flex-col gap-0.5"
-                    >
-                      <span className="text-[11px] text-gray-500 uppercase tracking-wider">
-                        {label}
-                      </span>
-                      <span className="text-sm text-gray-200 truncate">
-                        {value}
-                      </span>
-                    </div>
-                  ));
-                })()}
-              </div>
-            </div>
-          )}
-
-          {isLoading ? (
-            <div className="space-y-3">
-              {Array.from({ length: 8 }).map((_, i) => (
-                <Skeleton key={i} className="h-8 w-full bg-white/10" />
-              ))}
-            </div>
-          ) : data && data.events.length > 0 ? (
-            <>
-              <h3 className="text-xs font-medium text-gray-400 uppercase tracking-wider mb-2 shrink-0">
-                Event List ({data.totalCount})
-              </h3>
-              <div className="flex-1 rounded-lg border border-white/10 overflow-auto min-h-0">
-                <Table>
-                  <TableHeader className="sticky top-0 z-10 bg-[#0e0e18]">
-                    <TableRow className="border-white/10 hover:bg-transparent">
-                      {orderedFields.map((name) => (
-                        <TableHead
-                          key={name}
-                          className="text-gray-400 text-xs font-medium whitespace-nowrap bg-[#0e0e18]"
-                        >
-                          {formatFieldName(name)}
-                        </TableHead>
-                      ))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {data.events.map((event, idx) => (
-                      <TableRow
-                        key={idx}
-                        className="border-white/10 hover:bg-white/5"
-                      >
-                        {orderedFields.map((name) => (
-                          <TableCell
-                            key={name}
-                            className="text-gray-300 text-xs whitespace-nowrap py-2"
-                          >
-                            {renderCellValue(name, event.fields[name])}
-                          </TableCell>
-                        ))}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            </>
-          ) : !error && !isLoading ? (
-            <p className="text-center text-sm text-gray-600 py-4">
-              No events in this channel
-            </p>
-          ) : null}
-
-          {data && (
-            <div className="flex items-center justify-center gap-2 text-xs text-gray-600 mt-3 shrink-0">
-              <Loader2 className="w-3 h-3 animate-spin" />
-              Auto-refreshes every 10 seconds
-            </div>
-          )}
-        </div>
-      </SheetContent>
-    </Sheet>
-  );
-}
-
 // --- Main Page ---
+
+type ActivityFilter = "all" | "active" | "inactive";
 
 export default function DevicesPage() {
   const [selectedName, setSelectedName] = useState<string | null>(null);
-  const [selectedDevice, setSelectedDevice] = useState<DeviceEntry | null>(
-    null
-  );
+  const [filter, setFilter] = useState<ActivityFilter>("all");
   const [mounted, setMounted] = useState(false);
+  const [selectedDevice, setSelectedDevice] = useState<DeviceEntry | null>(null);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration guard for Radix useId()
   useEffect(() => setMounted(true), []);
 
   const { data: tree, isLoading: treeLoading } = useClientTree("FORTRESS");
+
+  // Auto-poll scan every 10 minutes (aligned with server-side 600s cache TTL)
+  const { data: scanData, isLoading: scanLoading, freshRescan: rescan } = useChannelScan(true, { refetchInterval: 600_000 });
+
+  // Build scan lookup map
+  const scanMap = useMemo(() => {
+    if (!scanData?.results) return new Map<string, ScanInfo>();
+    const map = new Map<string, ScanInfo>();
+    for (const r of scanData.results) {
+      map.set(r.channelId, {
+        hasEvents: r.hasEvents,
+        eventCount: r.eventCount,
+        latestManagerReceiptTime: r.latestManagerReceiptTime ?? null,
+        firstEventId: r.eventIds?.[0],
+        eventFields: r.eventFields,
+      });
+    }
+
+    // Diagnostic: log scan map state
+    if (scanData?.results) {
+      console.log(`[devices-page] scanMap built with ${map.size} entries from ${scanData.results.length} scan results`);
+      if (map.size > 0) {
+        const sampleKeys = Array.from(map.keys()).slice(0, 3);
+        console.log(`[devices-page] Sample scanMap keys:`, sampleKeys);
+      }
+    }
+
+    return map;
+  }, [scanData]);
+
+  // Diagnostic: Log device selection and scanMap lookup
+  useEffect(() => {
+    if (selectedDevice && scanMap.size > 0) {
+      const scanInfo = scanMap.get(selectedDevice.resourceId);
+      console.log(`[devices-page] Selected device "${selectedDevice.displayName}" (${selectedDevice.resourceId}): scanInfo=${scanInfo ? 'FOUND' : 'NOT FOUND'}`);
+      if (!scanInfo && scanMap.size > 0) {
+        console.warn(`[devices-page] Device resourceId not found in scanMap. Device ID: ${selectedDevice.resourceId.slice(0, 20)}...`);
+        console.warn(`[devices-page] scanMap has ${scanMap.size} entries but selected device ID doesn't match any`);
+      }
+    }
+  }, [selectedDevice, scanMap]);
 
   // Extract client-level nodes from tree categories (2 levels deep):
   // FORTRESS → categories (Device Monitoring, Incident Monitoring) → clients (SAMEE, TEST)
@@ -529,10 +605,38 @@ export default function DevicesPage() {
     return groups;
   }, [selectedClient]);
 
-  const totalDevices = deviceGroups.reduce(
-    (sum, g) => sum + g.devices.length,
-    0
-  );
+  // Flatten all devices for counting
+  const allDevices = useMemo(() => {
+    return deviceGroups.flatMap((g) => g.devices);
+  }, [deviceGroups]);
+
+  // While scan is in-flight and no cached data exists, treat devices as
+  // "estimated healthy" instead of falling through to stale metadata
+  const scanInProgress = scanLoading && !scanData;
+
+  // Filtered groups based on activity filter
+  const filteredGroups = useMemo(() => {
+    if (filter === "all") return deviceGroups;
+    return deviceGroups
+      .map((g) => ({
+        ...g,
+        devices: g.devices.filter((d) => {
+          const { status } = getDeviceHealth(d.lastUpdateTime, scanMap.get(d.resourceId), scanInProgress);
+          return filter === "active" ? status === "healthy" : status === "unhealthy";
+        }),
+      }))
+      .filter((g) => g.devices.length > 0);
+  }, [deviceGroups, filter, scanMap, scanInProgress]);
+
+  const { active: activeCount, inactive: inactiveCount } = useMemo(() => {
+    let active = 0;
+    for (const d of allDevices) {
+      if (getDeviceHealth(d.lastUpdateTime, scanMap.get(d.resourceId), scanInProgress).status === "healthy") active++;
+    }
+    return { active, inactive: allDevices.length - active };
+  }, [allDevices, scanMap, scanInProgress]);
+
+  const totalDevices = allDevices.length;
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
@@ -544,37 +648,68 @@ export default function DevicesPage() {
             Monitored devices from the channel tree for each client
           </p>
         </div>
+        <div className="flex items-center gap-2">
+          {scanLoading && (
+            <Badge variant="outline" className="bg-blue-500/10 text-blue-400 border-blue-500/20 text-xs">
+              <Loader2 className="w-3 h-3 animate-spin mr-1" />
+              Scanning...
+            </Badge>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={rescan}
+            disabled={scanLoading}
+            className="text-gray-400 hover:text-white gap-1.5"
+          >
+            <RefreshCw className={`w-4 h-4 ${scanLoading ? "animate-spin" : ""}`} />
+            Rescan
+          </Button>
+        </div>
       </header>
 
       <main className="flex-1 overflow-y-auto p-6 space-y-6">
-        {/* Client selector */}
-        <div className="flex items-center gap-4">
+        {/* Client selector + filter controls */}
+        <div className="flex items-center gap-4 flex-wrap">
           <label className="text-sm text-gray-400 shrink-0">Client</label>
-          {mounted ? (
-            <Select
-              value={selectedName ?? ""}
-              onValueChange={(v) => setSelectedName(v || null)}
+          <div className="flex items-center gap-3">
+            {mounted ? (
+              <Select
+                value={selectedName ?? ""}
+                onValueChange={(v) => setSelectedName(v || null)}
+              >
+                <SelectTrigger className="w-72 bg-[#12121a] border-white/10 text-white">
+                  <SelectValue placeholder="Select a client..." />
+                </SelectTrigger>
+                <SelectContent className="bg-[#12121a] border-white/10 text-white">
+                  {treeLoading ? (
+                    <div className="px-3 py-2 text-sm text-gray-500">
+                      Loading clients...
+                    </div>
+                  ) : (
+                    treeClients.map((client) => (
+                      <SelectItem key={client.resourceId} value={client.name}>
+                        {client.name}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            ) : (
+              <div className="h-9 w-72 rounded-md bg-[#12121a] border border-white/10" />
+            )}
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => rescan()}
+              disabled={scanLoading}
+              className="gap-2"
             >
-              <SelectTrigger className="w-72 bg-[#12121a] border-white/10 text-white">
-                <SelectValue placeholder="Select a client..." />
-              </SelectTrigger>
-              <SelectContent className="bg-[#12121a] border-white/10 text-white">
-                {treeLoading ? (
-                  <div className="px-3 py-2 text-sm text-gray-500">
-                    Loading clients...
-                  </div>
-                ) : (
-                  treeClients.map((client) => (
-                    <SelectItem key={client.resourceId} value={client.name}>
-                      {client.name}
-                    </SelectItem>
-                  ))
-                )}
-              </SelectContent>
-            </Select>
-          ) : (
-            <div className="h-9 w-72 rounded-md bg-[#12121a] border border-white/10" />
-          )}
+              <RefreshCw className={`h-4 w-4 ${scanLoading ? 'animate-spin' : ''}`} />
+              {scanLoading ? 'Scanning...' : 'Refresh Scan'}
+            </Button>
+          </div>
 
           {selectedClient && (
             <div className="flex items-center gap-3 text-sm text-gray-400">
@@ -586,6 +721,44 @@ export default function DevicesPage() {
                 <MonitorSmartphone className="w-3.5 h-3.5" />
                 {totalDevices} device{totalDevices !== 1 && "s"}
               </span>
+            </div>
+          )}
+
+          {/* Activity filter — shown when client is selected */}
+          {selectedClient && (
+            <div className="flex items-center gap-1 p-1 bg-[#12121a] rounded-lg border border-white/10 ml-auto">
+              <button
+                onClick={() => setFilter("all")}
+                className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                  filter === "all"
+                    ? "bg-white/10 text-white"
+                    : "text-gray-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setFilter("active")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                  filter === "active"
+                    ? "bg-green-500/20 text-green-400"
+                    : "text-gray-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <span className="w-2 h-2 rounded-full bg-green-500" />
+                Active ({activeCount})
+              </button>
+              <button
+                onClick={() => setFilter("inactive")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                  filter === "inactive"
+                    ? "bg-red-500/20 text-red-400"
+                    : "text-gray-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <span className="w-2 h-2 rounded-full bg-red-500" />
+                Inactive ({inactiveCount})
+              </button>
             </div>
           )}
         </div>
@@ -631,28 +804,42 @@ export default function DevicesPage() {
         {/* Device group sections */}
         {selectedClient && !treeLoading && (
           <div className="space-y-3">
-            {deviceGroups.length === 0 ? (
+            {filteredGroups.length === 0 ? (
               <div className="text-center py-16 text-gray-500">
-                No devices found for this client
+                {filter !== "all"
+                  ? `No ${filter} devices \u2014 try switching to "All"`
+                  : "No devices found for this client"}
               </div>
             ) : (
-              deviceGroups.map((group) => (
+              filteredGroups.map((group) => (
                 <DeviceGroupSection
                   key={group.name}
                   group={group}
+                  scanMap={scanMap}
+                  scanInProgress={scanInProgress}
                   onSelectDevice={setSelectedDevice}
                 />
               ))
             )}
           </div>
         )}
+
+        {/* Footer status */}
+        <p className="text-xs text-gray-600 text-center">
+          Client tree refreshes every 5 min &middot; Event scan every 10 min
+          {scanLoading && " (scanning...)"}
+          {scanData?.scannedAt && !scanLoading && (
+            <> &middot; Last scan: {new Date(scanData.scannedAt).toLocaleTimeString()}</>
+          )}
+          {!scanData && !scanLoading && " &middot; * = estimated (scan pending)"}
+        </p>
       </main>
 
-      {/* Event sheet */}
-      <DeviceEventSheet
+      <DeviceDetailPanel
         device={selectedDevice}
         clientName={selectedName}
         onClose={() => setSelectedDevice(null)}
+        scanInfo={selectedDevice ? scanMap.get(selectedDevice.resourceId) : undefined}
       />
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import type {
   Client,
   Connector,
@@ -8,6 +8,26 @@ import type {
   ConnectorHealth,
   ConnectorHealthEnriched,
 } from "@/types/arcsight";
+
+// --- Page Visibility ---
+// Pauses all polling when the browser tab is hidden to reduce server load.
+
+function subscribeToVisibility(cb: () => void) {
+  document.addEventListener("visibilitychange", cb);
+  return () => document.removeEventListener("visibilitychange", cb);
+}
+
+function getVisibilitySnapshot() {
+  return document.visibilityState === "visible";
+}
+
+function getServerSnapshot() {
+  return true; // SSR: assume visible
+}
+
+function usePageVisible(): boolean {
+  return useSyncExternalStore(subscribeToVisibility, getVisibilitySnapshot, getServerSnapshot);
+}
 
 interface QueryResult<T> {
   data: T | null;
@@ -30,23 +50,38 @@ function useArcsightQuery<T>(
   const [error, setError] = useState<string | null>(null);
   const [trigger, setTrigger] = useState(0);
   const hasFetched = useRef(false);
+  const fetchingRef = useRef(false);
+  const isVisible = usePageVisible();
+
+  // Derived loading state to catch the first render of a new URL
+  // eslint-disable-next-line react-hooks/refs -- hasFetched ref is intentionally read during render to avoid extra re-renders from state
+  const isActuallyLoading = isLoading || (url !== null && !hasFetched.current);
 
   const refetch = useCallback(() => setTrigger((t) => t + 1), []);
 
   useEffect(() => {
-    if (!url) return;
+    if (!url) {
+      setData(null);
+      setError(null);
+      hasFetched.current = false;
+      setIsLoading(false);
+      return;
+    }
 
     let cancelled = false;
     // Only show loading spinner on initial fetch, not on polls
-    /* eslint-disable react-hooks/set-state-in-effect -- data fetching requires sync state before async call */
     if (!hasFetched.current) {
       setIsLoading(true);
     }
     setError(null);
-    /* eslint-enable react-hooks/set-state-in-effect */
 
+    fetchingRef.current = true;
     fetch(url)
       .then(async (res) => {
+        if (res.status === 401) {
+          window.location.href = "/";
+          throw new Error("Session expired");
+        }
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.error ?? `HTTP ${res.status}`);
@@ -64,7 +99,11 @@ function useArcsightQuery<T>(
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Unknown error");
           setIsLoading(false);
+          hasFetched.current = true;
         }
+      })
+      .finally(() => {
+        fetchingRef.current = false;
       });
 
     return () => {
@@ -72,20 +111,23 @@ function useArcsightQuery<T>(
     };
   }, [url, trigger]);
 
-  // Auto-polling
+  // Auto-polling — paused when tab is hidden, skipped when a fetch is in-flight
   useEffect(() => {
-    if (!url || !options?.refetchInterval) return;
-    const id = setInterval(refetch, options.refetchInterval);
+    if (!url || !options?.refetchInterval || !isVisible) return;
+    const id = setInterval(() => {
+      if (!fetchingRef.current) refetch();
+    }, options.refetchInterval);
     return () => clearInterval(id);
-  }, [url, options?.refetchInterval, refetch]);
+  }, [url, options?.refetchInterval, refetch, isVisible]);
 
-  return { data, isLoading, error, refetch };
+  // eslint-disable-next-line react-hooks/refs -- isActuallyLoading is derived from hasFetched ref (see above)
+  return { data, isLoading: isActuallyLoading, error, refetch };
 }
 
 export function useClients(search?: string): QueryResult<Client[]> {
   const params = search ? `?search=${encodeURIComponent(search)}` : "";
   return useArcsightQuery<Client[]>(`/api/arcsight/clients${params}`, {
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   });
 }
 
@@ -101,20 +143,20 @@ export function useClientConnectors(
     ? `/api/arcsight/clients/${clientId}/connectors`
     : null;
   return useArcsightQuery<ConnectorWithDevices[]>(url, {
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   });
 }
 
 export function useConnectorHealth(): QueryResult<ConnectorHealth> {
   return useArcsightQuery<ConnectorHealth>("/api/arcsight/connectors/health", {
-    refetchInterval: 15_000,
+    refetchInterval: 45_000,
   });
 }
 
 export function useConnectorHealthDetailed(): QueryResult<ConnectorHealthEnriched> {
   return useArcsightQuery<ConnectorHealthEnriched>(
     "/api/arcsight/connectors/health/detailed",
-    { refetchInterval: 30_000 }
+    { refetchInterval: 60_000 }
   );
 }
 
@@ -149,6 +191,8 @@ interface ChannelResult {
   events: ChannelEvent[];
   totalCount: number;
   fieldNames: string[];
+  eventIds?: number[];
+  isFilterExpressionOnly?: boolean;
 }
 
 export function useActiveChannelEvents(channelId?: string): QueryResult<ChannelResult> {
@@ -156,7 +200,7 @@ export function useActiveChannelEvents(channelId?: string): QueryResult<ChannelR
     ? `/api/arcsight/channels/active?channelId=${encodeURIComponent(channelId)}`
     : "/api/arcsight/channels/active";
   return useArcsightQuery<ChannelResult>(url, {
-    refetchInterval: 10_000,
+    refetchInterval: 60_000,
   });
 }
 
@@ -166,7 +210,7 @@ export function useChannelEventsOnDemand(
   const url = channelId
     ? `/api/arcsight/channels/active?channelId=${encodeURIComponent(channelId)}`
     : null;
-  return useArcsightQuery<ChannelResult>(url, { refetchInterval: 10_000 });
+  return useArcsightQuery<ChannelResult>(url, { refetchInterval: 60_000 });
 }
 
 // --- Channel listing ---
@@ -195,7 +239,7 @@ interface ChannelListResult {
 
 export function useChannelList(): QueryResult<ChannelListResult> {
   return useArcsightQuery<ChannelListResult>("/api/arcsight/channels/list", {
-    refetchInterval: 60_000,
+    refetchInterval: 300_000,
   });
 }
 
@@ -212,13 +256,13 @@ interface ClientNode {
 export function useClientTree(rootName?: string): QueryResult<ClientNode> {
   const params = rootName ? `?root=${encodeURIComponent(rootName)}` : "";
   return useArcsightQuery<ClientNode>(`/api/arcsight/channels/tree${params}`, {
-    refetchInterval: 60_000,
+    refetchInterval: 300_000,
   });
 }
 
 // --- Channel scan ---
 
-interface ChannelScanResult {
+export interface ChannelScanResult {
   channelId: string;
   channelName: string;
   groupName: string;
@@ -226,6 +270,9 @@ interface ChannelScanResult {
   hasEvents: boolean;
   eventCount: number;
   fieldNames: string[];
+  eventIds?: number[];
+  latestManagerReceiptTime: number | null;
+  eventFields?: Record<string, string | number | null>;
   error?: string;
 }
 
@@ -234,15 +281,80 @@ interface ChannelScanResponse {
   scannedAt: string;
 }
 
-/** Pass enabled=true to start scanning. Optional refetchInterval for auto-rescan. */
+/** Pass enabled=true to start scanning. Optional refetchInterval for auto-rescan.
+ *  Returns an extra `freshRescan` that bypasses the server cache (?fresh=true). */
 export function useChannelScan(
   enabled: boolean,
   options?: { refetchInterval?: number }
-): QueryResult<ChannelScanResponse> {
+): QueryResult<ChannelScanResponse> & { freshRescan: () => void } {
   const url = enabled ? "/api/arcsight/channels/scan" : null;
-  return useArcsightQuery<ChannelScanResponse>(url, {
+  const query = useArcsightQuery<ChannelScanResponse>(url, {
     refetchInterval: options?.refetchInterval,
   });
+
+  // Fresh rescan: bypass server cache, show loading, update data in-place
+  const [freshLoading, setFreshLoading] = useState(false);
+  const [freshData, setFreshData] = useState<ChannelScanResponse | null>(null);
+  const [freshError, setFreshError] = useState<string | null>(null);
+
+  const freshRescan = useCallback(() => {
+    if (!enabled || freshLoading) return;
+    setFreshLoading(true);
+    setFreshError(null);
+    fetch("/api/arcsight/channels/scan?fresh=true")
+      .then(async (res) => {
+        if (res.status === 401) {
+          window.location.href = "/";
+          throw new Error("Session expired");
+        }
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? `HTTP ${res.status}`);
+        }
+        return res.json() as Promise<ChannelScanResponse>;
+      })
+      .then((result) => setFreshData(result))
+      .catch((err) => setFreshError(err instanceof Error ? err.message : "Unknown error"))
+      .finally(() => setFreshLoading(false));
+  }, [enabled, freshLoading]);
+
+  return {
+    data: freshData ?? query.data,
+    isLoading: query.isLoading || freshLoading,
+    error: freshError ?? query.error,
+    refetch: query.refetch,
+    freshRescan,
+  };
+}
+
+// --- Multi-channel live polling ---
+
+interface MultiChannelLiveResult {
+  channels: Record<string, ChannelResult>;
+  liveCount: number;
+}
+
+/** Poll up to 5 channels simultaneously. Pass empty array to disable. */
+export function useMultiChannelLive(
+  channelIds: string[]
+): QueryResult<MultiChannelLiveResult> {
+  const ids = channelIds.slice(0, 5);
+  const url =
+    ids.length > 0
+      ? `/api/arcsight/channels/live?ids=${ids.map(encodeURIComponent).join(",")}`
+      : null;
+  return useArcsightQuery<MultiChannelLiveResult>(url, {
+    refetchInterval: 60_000,
+  });
+}
+
+/** Cleanup: close all live channels when the component unmounts. */
+export function useMultiChannelCleanup() {
+  useEffect(() => {
+    return () => {
+      fetch("/api/arcsight/channels/live", { method: "DELETE" }).catch(() => {});
+    };
+  }, []);
 }
 
 // --- Mutation hooks ---
@@ -272,6 +384,10 @@ function useArcsightMutation(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ connectorIds }),
         });
+        if (res.status === 401) {
+          window.location.href = "/";
+          throw new Error("Session expired");
+        }
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.error ?? `HTTP ${res.status}`);
@@ -321,11 +437,12 @@ interface EventCountResult {
 export function useEventCount(
   timeRangeMinutes = 60
 ): QueryResult<EventCountResult> {
+  // eslint-disable-next-line react-hooks/purity -- Intentional: timestamp recomputed each poll cycle via refetchInterval
   const now = Date.now();
   const startTime = now - timeRangeMinutes * 60 * 1000;
   return useArcsightQuery<EventCountResult>(
     `/api/arcsight/events?mode=count&startTime=${startTime}&endTime=${now}`,
-    { refetchInterval: 30_000 }
+    { refetchInterval: 60_000 }
   );
 }
 
@@ -333,6 +450,48 @@ export function useEventFieldInfo(): QueryResult<Record<string, unknown>> {
   return useArcsightQuery<Record<string, unknown>>(
     "/api/arcsight/events?mode=fields"
   );
+}
+
+// --- Event details (EventService — full ~450 CEF fields) ---
+
+interface EventFieldDetail {
+  fieldName: string;
+  displayName: string;
+  value: string | number | null;
+  category: string | null;
+  dataType: string | null;
+}
+
+interface FullEventDetail {
+  eventId: number;
+  fields: Record<string, EventFieldDetail>;
+}
+
+interface EventDetailResult {
+  events: FullEventDetail[];
+  fieldNames: string[];
+  totalFieldCount: number;
+}
+
+/** Fetch full event details (all ~450 CEF fields) for a single event. No polling. */
+export function useEventDetails(
+  eventId: number | null
+): QueryResult<EventDetailResult> {
+  const url = eventId
+    ? `/api/arcsight/events/details?ids=${eventId}`
+    : null;
+  return useArcsightQuery<EventDetailResult>(url);
+}
+
+/** Composite: channel events + full event details for the first event. */
+export function useEventDetailsForChannel(
+  channelId: string | null,
+  fallbackEventId?: number | null,
+) {
+  const { data: channelData, isLoading, error } = useChannelEventsOnDemand(channelId);
+  const firstEventId = channelData?.eventIds?.[0] ?? fallbackEventId ?? null;
+  const { data: eventDetails, isLoading: isLoadingDetails, error: detailsError } = useEventDetails(firstEventId);
+  return { channelData, eventDetails, isLoading, isLoadingDetails, error, detailsError };
 }
 
 // --- Channel discovery ---
@@ -391,7 +550,7 @@ interface ArchivesResult {
 
 export function useReports(): QueryResult<ReportListResult> {
   return useArcsightQuery<ReportListResult>("/api/arcsight/reports", {
-    refetchInterval: 60_000,
+    refetchInterval: 120_000,
   });
 }
 
@@ -407,7 +566,7 @@ export function useReportArchives(
     ? `/api/arcsight/reports/${encodeURIComponent(reportId)}/archives`
     : null;
   return useArcsightQuery<ArchivesResult>(url, {
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
   });
 }
 
@@ -433,6 +592,10 @@ export function useRunReport(
         `/api/arcsight/reports/${encodeURIComponent(reportId)}/run`,
         { method: "POST" }
       );
+      if (res.status === 401) {
+        window.location.href = "/";
+        throw new Error("Session expired");
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `HTTP ${res.status}`);

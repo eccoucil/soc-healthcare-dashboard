@@ -1,10 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Activity, RefreshCw, Radio, X, Loader2, Scan, Database } from "lucide-react";
+import { Activity, ArrowLeft, RefreshCw, Radio, X, Loader2, ChevronRight, Expand, FolderOpen, MonitorSmartphone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Sheet,
   SheetContent,
@@ -21,12 +28,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
-  useChannelList,
   useChannelEventsOnDemand,
   useChannelScan,
   useClientTree,
+  useEventDetails,
+  useMultiChannelLive,
+  useMultiChannelCleanup,
 } from "@/hooks/use-arcsight";
-import { ChevronRight, FolderTree, LayoutGrid, Users } from "lucide-react";
 
 type ActivityFilter = "all" | "active" | "inactive";
 
@@ -37,7 +45,6 @@ interface ChannelCircleData {
   groupName: string;
   lastUpdateTime: string | null;
 }
-
 
 const SUBTYPE_COLORS: Record<string, { ring: string; dot: string }> = {
   Event: { ring: "ring-green-500/50", dot: "bg-green-500" },
@@ -63,8 +70,16 @@ function getChannelHealth(
   lastUpdateTime: string | null,
   scanInfo?: ScanInfo
 ): HealthResult {
-  // Primary: scan results (actual event flow)
+  // Primary: scan results with managerReceiptTime (actual event flow)
   if (scanInfo !== undefined) {
+    if (scanInfo.latestManagerReceiptTime !== null) {
+      const age = Date.now() - scanInfo.latestManagerReceiptTime;
+      return {
+        status: age <= 10 * 60_000 ? "healthy" : "unhealthy",
+        source: "scan",
+      };
+    }
+    // No managerReceiptTime but scan completed — use hasEvents as fallback
     return {
       status: scanInfo.hasEvents ? "healthy" : "unhealthy",
       source: "scan",
@@ -96,6 +111,7 @@ function formatCellValue(value: string | number | null): string {
 interface ScanInfo {
   hasEvents: boolean;
   eventCount: number;
+  latestManagerReceiptTime: number | null;
 }
 
 function ChannelCircle({
@@ -175,25 +191,182 @@ function ChannelCircle({
   );
 }
 
-function shuffleArray<T>(arr: T[]): T[] {
-  const shuffled = [...arr];
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  return shuffled;
+function ChannelFieldSection({
+  section,
+  entries,
+  defaultOpen,
+}: {
+  section: string;
+  entries: [string, string | number | null][];
+  defaultOpen: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-lg border border-white/10 bg-[#12121a]">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full px-4 py-2 flex items-center justify-between text-left hover:bg-white/5 transition-colors rounded-lg"
+      >
+        <span className="text-xs font-medium text-gray-300 uppercase tracking-wider">
+          {section}
+        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-gray-600">
+            {entries.length} field{entries.length !== 1 ? "s" : ""}
+          </span>
+          <ChevronRight
+            className={`w-3 h-3 text-gray-500 transition-transform ${open ? "rotate-90" : ""}`}
+          />
+        </div>
+      </button>
+      {open && (
+        <div className="border-t border-white/5">
+          {entries.map(([key, value]) => (
+            <div
+              key={key}
+              className="grid grid-cols-[160px_1fr] gap-2 px-4 py-1.5 border-b border-white/5 last:border-b-0"
+            >
+              <span className="text-[11px] text-gray-500 truncate">
+                {key}
+              </span>
+              <span
+                className={`text-[11px] break-all ${
+                  value == null || value === ""
+                    ? "text-gray-700 italic"
+                    : "text-gray-300"
+                }`}
+              >
+                {formatCellValue(value)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChannelFullDetailPanel({
+  eventId,
+  onBack,
+}: {
+  eventId: number;
+  onBack: () => void;
+}) {
+  const { data, isLoading, error } = useEventDetails(eventId);
+
+  // Count non-null field values for display
+  const nonNullCount = useMemo(() => {
+    if (!data?.events?.[0]) return 0;
+    return Object.values(data.events[0].fields).filter((f) => f.value != null).length;
+  }, [data]);
+
+  // Group fields by category
+  const sections = useMemo(() => {
+    if (!data?.events?.[0]) return [];
+    const fields = data.events[0].fields;
+    const groups = new Map<string, [string, string | number | null][]>();
+    for (const detail of Object.values(fields)) {
+      const section = detail.category ?? "Other";
+      if (!groups.has(section)) groups.set(section, []);
+      groups.get(section)!.push([detail.displayName, detail.value]);
+    }
+    for (const entries of groups.values()) {
+      entries.sort((a, b) => a[0].localeCompare(b[0]));
+    }
+    return [...groups.entries()]
+      .sort(([a], [b]) => {
+        if (a === "Other") return 1;
+        if (b === "Other") return -1;
+        return a.localeCompare(b);
+      })
+      .map(([section, entries]) => ({ section, entries }));
+  }, [data]);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onBack}
+          className="text-gray-400 hover:text-white -ml-2"
+        >
+          <ArrowLeft className="w-3.5 h-3.5 mr-1" />
+          Back
+        </Button>
+        <span className="text-xs text-gray-500 ml-auto">
+          {data ? `${nonNullCount}/${data.totalFieldCount} fields` : "Loading..."}
+        </span>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
+          <Activity className="w-4 h-4 text-red-400 shrink-0" />
+          <p className="text-sm text-red-300">{error}</p>
+        </div>
+      )}
+
+      {isLoading ? (
+        <div className="space-y-3">
+          {Array.from({ length: 12 }).map((_, i) => (
+            <Skeleton key={i} className="h-8 w-full bg-white/10" />
+          ))}
+        </div>
+      ) : sections.length > 0 ? (
+        <div className="space-y-2">
+          {sections.map(({ section, entries }, idx) => (
+            <ChannelFieldSection
+              key={section}
+              section={section}
+              entries={entries}
+              defaultOpen={idx < 5}
+            />
+          ))}
+        </div>
+      ) : (
+        <p className="text-center text-sm text-gray-600 py-4">
+          No field data returned
+        </p>
+      )}
+    </div>
+  );
+}
+
+interface ChannelResultLike {
+  events: { fields: Record<string, string | number | null> }[];
+  totalCount: number;
+  fieldNames: string[];
+  eventIds?: number[];
 }
 
 function ChannelEventSheet({
   channel,
   onClose,
+  liveResult,
 }: {
   channel: ChannelCircleData | null;
   onClose: () => void;
+  liveResult?: ChannelResultLike | null;
 }) {
-  const { data, isLoading, error } = useChannelEventsOnDemand(
-    channel?.resourceId ?? null
+  // Skip the on-demand subscription if we already have live data
+  const hasLive = !!(liveResult && liveResult.events.length > 0);
+  const { data: onDemandData, isLoading: onDemandLoading, error } = useChannelEventsOnDemand(
+    hasLive ? null : (channel?.resourceId ?? null)
   );
+  const data = hasLive ? liveResult : onDemandData;
+  const isLoading = hasLive ? false : onDemandLoading;
+
+  // Reset selection when channel changes by tracking the resource ID
+  const currentResourceId = channel?.resourceId ?? null;
+  const [selection, setSelection] = useState<{ resourceId: string | null; eventId: number | null }>({
+    resourceId: currentResourceId,
+    eventId: null,
+  });
+  const selectedEventId =
+    selection.resourceId === currentResourceId ? selection.eventId : null;
+  const setSelectedEventId = (id: number | null) =>
+    setSelection({ resourceId: currentResourceId, eventId: id });
 
   return (
     <Sheet open={!!channel} onOpenChange={(open) => !open && onClose()}>
@@ -249,6 +422,12 @@ function ChannelEventSheet({
         </SheetHeader>
 
         <div className="pt-4 space-y-4">
+          {selectedEventId !== null ? (
+            <ChannelFullDetailPanel
+              eventId={selectedEventId}
+              onBack={() => setSelectedEventId(null)}
+            />
+          ) : (<>
           {error && (
             <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
               <Activity className="w-4 h-4 text-red-400 shrink-0" />
@@ -267,6 +446,7 @@ function ChannelEventSheet({
               <Table>
                 <TableHeader>
                   <TableRow className="border-white/10 hover:bg-transparent">
+                    <TableHead className="text-gray-400 text-xs font-medium whitespace-nowrap w-8" />
                     {data.fieldNames.map((name) => (
                       <TableHead
                         key={name}
@@ -278,21 +458,36 @@ function ChannelEventSheet({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {data.events.map((event, idx) => (
-                    <TableRow
-                      key={idx}
-                      className="border-white/10 hover:bg-white/5"
-                    >
-                      {data.fieldNames.map((name) => (
-                        <TableCell
-                          key={name}
-                          className="text-gray-300 text-xs whitespace-nowrap py-2"
-                        >
-                          {formatCellValue(event.fields[name])}
+                  {data.events.map((event, idx) => {
+                    const eid = event.fields["eventId"];
+                    const numericId = typeof eid === "number" ? eid : eid != null ? Number(eid) : null;
+                    return (
+                      <TableRow
+                        key={idx}
+                        className="border-white/10 hover:bg-white/5"
+                      >
+                        <TableCell className="py-2 w-8">
+                          {numericId && numericId > 0 ? (
+                            <button
+                              onClick={() => setSelectedEventId(numericId)}
+                              className="p-1 rounded hover:bg-white/10 text-gray-500 hover:text-gray-300 transition-colors"
+                              title="View full event details (~450 fields)"
+                            >
+                              <Expand className="w-3 h-3" />
+                            </button>
+                          ) : null}
                         </TableCell>
-                      ))}
-                    </TableRow>
-                  ))}
+                        {data.fieldNames.map((name) => (
+                          <TableCell
+                            key={name}
+                            className="text-gray-300 text-xs whitespace-nowrap py-2"
+                          >
+                            {formatCellValue(event.fields[name])}
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </div>
@@ -306,532 +501,37 @@ function ChannelEventSheet({
           {data && (
             <div className="flex items-center justify-center gap-2 text-xs text-gray-600">
               <Loader2 className="w-3 h-3 animate-spin" />
-              Auto-refreshes every 10 seconds
+              Auto-refreshes every 60 seconds
             </div>
           )}
+          </>)}
         </div>
       </SheetContent>
     </Sheet>
   );
 }
 
-function ScanResultsTable({
-  results,
-  scannedAt,
-}: {
-  results: {
-    channelId: string;
-    channelName: string;
-    groupName: string;
-    subType: string;
-    hasEvents: boolean;
-    eventCount: number;
-    fieldNames: string[];
-    error?: string;
-  }[];
-  scannedAt: string;
-}) {
-  const withEvents = results.filter((r) => r.hasEvents);
-  const withErrors = results.filter((r) => r.error);
+// --- Channel group section (collapsible) ---
 
-  return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h3 className="text-sm font-semibold text-white">Scan Results</h3>
-          <Badge
-            variant="outline"
-            className="bg-green-500/15 text-green-400 border-green-500/20 text-xs"
-          >
-            {withEvents.length} with data
-          </Badge>
-          <Badge
-            variant="outline"
-            className="bg-gray-500/15 text-gray-400 border-gray-500/20 text-xs"
-          >
-            {results.length - withEvents.length - withErrors.length} empty
-          </Badge>
-          {withErrors.length > 0 && (
-            <Badge
-              variant="outline"
-              className="bg-red-500/15 text-red-400 border-red-500/20 text-xs"
-            >
-              {withErrors.length} error(s)
-            </Badge>
-          )}
-        </div>
-        <span className="text-xs text-gray-500">
-          Scanned {new Date(scannedAt).toLocaleTimeString()}
-        </span>
-      </div>
-      <div className="rounded-lg border border-white/10 overflow-x-auto">
-        <Table>
-          <TableHeader>
-            <TableRow className="border-white/10 hover:bg-transparent">
-              <TableHead className="text-gray-400 text-xs">Channel</TableHead>
-              <TableHead className="text-gray-400 text-xs">Group</TableHead>
-              <TableHead className="text-gray-400 text-xs">Type</TableHead>
-              <TableHead className="text-gray-400 text-xs text-right">Events</TableHead>
-              <TableHead className="text-gray-400 text-xs">Fields</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {results.map((r) => (
-              <TableRow
-                key={r.channelId}
-                className="border-white/10 hover:bg-white/5"
-              >
-                <TableCell className="text-xs py-2">
-                  <div className="flex items-center gap-2">
-                    <div
-                      className={`w-2 h-2 rounded-full ${
-                        r.error
-                          ? "bg-red-500"
-                          : r.hasEvents
-                            ? "bg-green-500"
-                            : "bg-gray-600"
-                      }`}
-                    />
-                    <span className="text-gray-200">{r.channelName}</span>
-                  </div>
-                </TableCell>
-                <TableCell className="text-gray-400 text-xs py-2">{r.groupName}</TableCell>
-                <TableCell className="text-gray-400 text-xs py-2">{r.subType}</TableCell>
-                <TableCell className="text-right py-2">
-                  {r.error ? (
-                    <span className="text-red-400 text-xs" title={r.error}>error</span>
-                  ) : (
-                    <span
-                      className={`text-xs font-mono ${
-                        r.hasEvents ? "text-green-400" : "text-gray-600"
-                      }`}
-                    >
-                      {r.eventCount}
-                    </span>
-                  )}
-                </TableCell>
-                <TableCell className="text-gray-500 text-xs py-2 max-w-[200px] truncate">
-                  {r.fieldNames.length > 0 ? r.fieldNames.join(", ") : "\u2014"}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-    </div>
-  );
-}
-
-function ChannelCanvasView() {
-  const { data, isLoading, error, refetch } = useChannelList();
-  const [selectedChannel, setSelectedChannel] = useState<ChannelCircleData | null>(null);
-  const [filter, setFilter] = useState<ActivityFilter>("all");
-  const [scanEnabled, setScanEnabled] = useState(false);
-  const {
-    data: scanData,
-    isLoading: scanLoading,
-    error: scanError,
-    refetch: rescan,
-  } = useChannelScan(scanEnabled);
-
-  const allChannels = useMemo(() => {
-    if (!data?.groups) return [];
-    const seen = new Set<string>();
-    const out: ChannelCircleData[] = [];
-    for (const g of data.groups) {
-      for (const ch of g.channels) {
-        if (seen.has(ch.resourceId)) continue;
-        seen.add(ch.resourceId);
-        out.push({
-          displayName: ch.displayName,
-          resourceId: ch.resourceId,
-          subType: ch.subType,
-          groupName: g.name,
-          lastUpdateTime: ch.lastUpdateTime,
-        });
-      }
-    }
-    return out;
-  }, [data]);
-
-  // Build lookup from scan results → per-channel event info
-  const scanMap = useMemo(() => {
-    if (!scanData?.results) return new Map<string, ScanInfo>();
-    const map = new Map<string, ScanInfo>();
-    for (const r of scanData.results) {
-      map.set(r.channelId, { hasEvents: r.hasEvents, eventCount: r.eventCount });
-    }
-    return map;
-  }, [scanData]);
-
-  const filteredChannels = useMemo(() => {
-    if (filter === "all") return allChannels;
-    return allChannels.filter((ch) => {
-      const { status } = getChannelHealth(ch.lastUpdateTime, scanMap.get(ch.resourceId));
-      return filter === "active" ? status === "healthy" : status === "unhealthy";
-    });
-  }, [allChannels, filter, scanMap]);
-
-  const [displayChannels, setDisplayChannels] = useState(filteredChannels);
-
-  // Sync when underlying data or filter changes
-  useEffect(() => {
-    setDisplayChannels(shuffleArray(filteredChannels));
-  }, [filteredChannels]);
-
-  // Rotate positions every 60 seconds for SOC TV display
-  useEffect(() => {
-    if (filteredChannels.length === 0) return;
-    const timer = setInterval(() => {
-      setDisplayChannels(shuffleArray(filteredChannels));
-    }, 60_000);
-    return () => clearInterval(timer);
-  }, [filteredChannels]);
-
-  const { active: activeCount, inactive: inactiveCount } = useMemo(() => {
-    let active = 0;
-    for (const ch of allChannels) {
-      if (getChannelHealth(ch.lastUpdateTime, scanMap.get(ch.resourceId)).status === "healthy") {
-        active++;
-      }
-    }
-    return { active, inactive: allChannels.length - active };
-  }, [allChannels, scanMap]);
-
-  return (
-    <>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h2 className="text-2xl font-bold">Channels</h2>
-          {data && (
-            <Badge
-              variant="outline"
-              className="bg-blue-500/15 text-blue-400 border-blue-500/20"
-            >
-              {filteredChannels.length} of {allChannels.length}
-            </Badge>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 p-1 bg-[#12121a] rounded-lg border border-white/10">
-            <button
-              onClick={() => setFilter("all")}
-              className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
-                filter === "all"
-                  ? "bg-white/10 text-white"
-                  : "text-gray-400 hover:text-white hover:bg-white/5"
-              }`}
-            >
-              All
-            </button>
-            <button
-              onClick={() => setFilter("active")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                filter === "active"
-                  ? "bg-green-500/20 text-green-400"
-                  : "text-gray-400 hover:text-white hover:bg-white/5"
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-green-500" />
-              Active ({activeCount})
-            </button>
-            <button
-              onClick={() => setFilter("inactive")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                filter === "inactive"
-                  ? "bg-red-500/20 text-red-400"
-                  : "text-gray-400 hover:text-white hover:bg-white/5"
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-red-500" />
-              Inactive ({inactiveCount})
-            </button>
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => { if (!scanEnabled) setScanEnabled(true); else rescan(); }}
-            disabled={scanLoading}
-            className="text-gray-400 hover:text-white gap-1.5"
-            title="Re-probe each channel for events"
-          >
-            {scanLoading ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Scan className="w-4 h-4" />
-            )}
-            {scanLoading ? "Scanning..." : scanEnabled ? "Rescan" : "Scan Events"}
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={refetch}
-            className="text-gray-400 hover:text-white"
-          >
-            <RefreshCw className="w-4 h-4" />
-          </Button>
-        </div>
-      </div>
-
-      {error && (
-        <div className="flex flex-col items-center gap-3 px-4 py-6 rounded-lg bg-red-500/10 border border-red-500/20">
-          <Activity className="w-6 h-6 text-red-400" />
-          <p className="text-sm text-red-300 text-center max-w-md">{error}</p>
-          {error.toLowerCase().includes("phoenix") || error.includes("fetch failed") ? (
-            <p className="text-xs text-gray-500 text-center max-w-md">
-              The REST API is working but the Phoenix GWT-RPC service is not responding.
-              Channels require the Phoenix UI application to be running on the ESM server.
-            </p>
-          ) : null}
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={refetch}
-            className="text-gray-400 hover:text-white gap-1.5 mt-1"
-          >
-            <RefreshCw className="w-4 h-4" />
-            Retry
-          </Button>
-        </div>
-      )}
-
-      {isLoading ? (
-        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-6 justify-items-center py-4">
-          {Array.from({ length: 14 }).map((_, i) => (
-            <div key={i} className="flex flex-col items-center gap-2">
-              <Skeleton className="w-20 h-20 rounded-full bg-white/10" />
-              <Skeleton className="h-3 w-16 bg-white/10" />
-            </div>
-          ))}
-        </div>
-      ) : displayChannels.length > 0 ? (
-        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-6 justify-items-center py-4">
-          {displayChannels.map((ch) => (
-            <ChannelCircle
-              key={ch.resourceId}
-              channel={ch}
-              onClick={() => setSelectedChannel(ch)}
-              scanInfo={scanMap.get(ch.resourceId)}
-            />
-          ))}
-        </div>
-      ) : allChannels.length > 0 && filter !== "all" ? (
-        <div className="text-center py-12">
-          <Radio className="w-10 h-10 text-gray-600 mx-auto mb-3" />
-          <p className="text-gray-500">
-            No {filter} channels — try switching to &quot;All&quot;
-          </p>
-          <p className="text-xs text-gray-600 mt-1">
-            {allChannels.length} total channel{allChannels.length !== 1 ? "s" : ""} across all statuses
-          </p>
-        </div>
-      ) : !error ? (
-        <div className="text-center py-12">
-          <Radio className="w-10 h-10 text-gray-600 mx-auto mb-3" />
-          <p className="text-gray-500">No channels found</p>
-        </div>
-      ) : null}
-
-      {scanError && (
-        <div className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20">
-          <Database className="w-4 h-4 text-red-400 shrink-0" />
-          <p className="text-sm text-red-300">Scan failed: {scanError}</p>
-        </div>
-      )}
-
-      {scanLoading && (
-        <div className="flex items-center justify-center gap-2 py-4">
-          <Loader2 className="w-4 h-4 animate-spin text-blue-400" />
-          <span className="text-sm text-gray-400">
-            Opening all channels, waiting for server to buffer, then polling for events...
-          </span>
-        </div>
-      )}
-
-      {scanData && !scanLoading && (
-        <ScanResultsTable
-          results={scanData.results}
-          scannedAt={scanData.scannedAt}
-        />
-      )}
-
-      <p className="text-xs text-gray-600 text-center">
-        Channel list refreshes every 60s &middot; Event scan every 3 min
-        {scanData?.scannedAt && (
-          <> &middot; Last scan: {new Date(scanData.scannedAt).toLocaleTimeString()}</>
-        )}
-        {!scanData && !scanLoading && " &middot; * = estimated (scan pending)"}
-      </p>
-
-      <ChannelEventSheet
-        channel={selectedChannel}
-        onClose={() => setSelectedChannel(null)}
-      />
-    </>
-  );
-}
-
-// --- Client Tree View ---
-
-interface ClientNode {
+interface ChannelGroup {
   name: string;
-  resourceId: string;
-  path: string;
   channels: ChannelCircleData[];
-  children: ClientNode[];
 }
 
-function countChannels(node: ClientNode): number {
-  let count = node.channels.length;
-  for (const child of node.children) {
-    count += countChannels(child);
-  }
-  return count;
-}
-
-function countActiveChannels(node: ClientNode): number {
-  let count = 0;
-  for (const ch of node.channels) {
-    if (getChannelHealth(ch.lastUpdateTime).status === "healthy") count++;
-  }
-  for (const child of node.children) {
-    count += countActiveChannels(child);
-  }
-  return count;
-}
-
-function getLatestUpdate(node: ClientNode): string | null {
-  let latest: number | null = null;
-  for (const ch of node.channels) {
-    if (ch.lastUpdateTime) {
-      const t = new Date(ch.lastUpdateTime).getTime();
-      if (!isNaN(t) && (latest === null || t > latest)) latest = t;
-    }
-  }
-  for (const child of node.children) {
-    const childLatest = getLatestUpdate(child);
-    if (childLatest) {
-      const t = new Date(childLatest).getTime();
-      if (latest === null || t > latest) latest = t;
-    }
-  }
-  return latest !== null ? new Date(latest).toISOString() : null;
-}
-
-function formatTimeAgo(iso: string | null): string {
-  if (!iso) return "No data";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (isNaN(ms)) return "Unknown";
-  if (ms < 60_000) return "Just now";
-  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
-  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`;
-  return `${Math.floor(ms / 86_400_000)}d ago`;
-}
-
-function ClientCard({
-  node,
+function ChannelGroupSection({
+  group,
   onSelectChannel,
+  scanMap,
 }: {
-  node: ClientNode;
+  group: ChannelGroup;
   onSelectChannel: (ch: ChannelCircleData) => void;
-}) {
-  const totalChannels = countChannels(node);
-  const activeChannels = countActiveChannels(node);
-  const inactiveChannels = totalChannels - activeChannels;
-  const latestUpdate = getLatestUpdate(node);
-
-  // If this node is just a pass-through with one child and no channels, skip it
-  if (node.channels.length === 0 && node.children.length === 1) {
-    return (
-      <ClientCard node={node.children[0]} onSelectChannel={onSelectChannel} />
-    );
-  }
-
-  return (
-    <div className="rounded-xl border border-white/10 bg-[#12121a] overflow-hidden">
-      {/* Client header */}
-      <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-red-600/20 flex items-center justify-center">
-            <Users className="w-4 h-4 text-red-400" />
-          </div>
-          <div>
-            <h3 className="text-white font-semibold text-sm">{node.name}</h3>
-            <div className="flex items-center gap-2 mt-0.5">
-              <span className="text-[11px] text-gray-500">{totalChannels} channel{totalChannels !== 1 ? "s" : ""}</span>
-              <span className="text-gray-700">&middot;</span>
-              <span className="text-[11px] text-gray-500">Updated {formatTimeAgo(latestUpdate)}</span>
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge
-            variant="outline"
-            className="bg-green-500/10 text-green-400 border-green-500/20 text-[11px] px-2 py-0"
-          >
-            {activeChannels} active
-          </Badge>
-          {inactiveChannels > 0 && (
-            <Badge
-              variant="outline"
-              className="bg-red-500/10 text-red-400 border-red-500/20 text-[11px] px-2 py-0"
-            >
-              {inactiveChannels} inactive
-            </Badge>
-          )}
-        </div>
-      </div>
-
-      {/* Channel circles */}
-      {node.channels.length > 0 && (
-        <div className="px-5 py-4">
-          <div className="flex flex-wrap gap-5">
-            {node.channels.map((ch) => (
-              <ChannelCircle
-                key={ch.resourceId}
-                channel={ch}
-                onClick={() => onSelectChannel(ch)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Sub-groups */}
-      {node.children.length > 0 && (
-        <div className="px-5 pb-4 space-y-3">
-          {node.channels.length > 0 && node.children.length > 0 && (
-            <div className="border-t border-white/5 pt-3" />
-          )}
-          <div className="flex items-center gap-2 text-xs text-gray-500">
-            <FolderTree className="w-3.5 h-3.5" />
-            <span>Sub-groups</span>
-          </div>
-          <div className="space-y-3">
-            {node.children.map((child) => (
-              <SubGroupSection
-                key={child.resourceId || child.name}
-                node={child}
-                onSelectChannel={onSelectChannel}
-              />
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SubGroupSection({
-  node,
-  onSelectChannel,
-}: {
-  node: ClientNode;
-  onSelectChannel: (ch: ChannelCircleData) => void;
+  scanMap?: Map<string, ScanInfo>;
 }) {
   const [expanded, setExpanded] = useState(true);
-  const total = countChannels(node);
-  const active = countActiveChannels(node);
+  const active = group.channels.filter(
+    (ch) => getChannelHealth(ch.lastUpdateTime, scanMap?.get(ch.resourceId)).status === "healthy"
+  ).length;
+  const inactive = group.channels.length - active;
 
   return (
     <div className="rounded-lg border border-white/5 bg-[#0e0e18]">
@@ -841,157 +541,229 @@ function SubGroupSection({
       >
         <div className="flex items-center gap-2">
           <ChevronRight
-            className={`w-3.5 h-3.5 text-gray-500 transition-transform ${expanded ? "rotate-90" : ""}`}
+            className={`w-3.5 h-3.5 text-gray-500 transition-transform ${
+              expanded ? "rotate-90" : ""
+            }`}
           />
-          <span className="text-sm text-gray-300">{node.name}</span>
+          <span className="text-sm text-gray-300">{group.name}</span>
           <span className="text-[11px] text-gray-600">
-            {total} channel{total !== 1 ? "s" : ""}
+            {group.channels.length} device{group.channels.length !== 1 ? "s" : ""}
           </span>
         </div>
         <div className="flex items-center gap-1.5">
           <span className="w-2 h-2 rounded-full bg-green-500" />
           <span className="text-[11px] text-gray-500">{active}</span>
-          {total - active > 0 && (
+          {inactive > 0 && (
             <>
               <span className="w-2 h-2 rounded-full bg-red-500 ml-1" />
-              <span className="text-[11px] text-gray-500">{total - active}</span>
+              <span className="text-[11px] text-gray-500">{inactive}</span>
             </>
           )}
         </div>
       </button>
-      {expanded && node.channels.length > 0 && (
+      {expanded && group.channels.length > 0 && (
         <div className="px-4 pb-3 pt-1">
           <div className="flex flex-wrap gap-5">
-            {node.channels.map((ch) => (
+            {group.channels.map((ch) => (
               <ChannelCircle
                 key={ch.resourceId}
                 channel={ch}
                 onClick={() => onSelectChannel(ch)}
+                scanInfo={scanMap?.get(ch.resourceId)}
               />
             ))}
           </div>
-        </div>
-      )}
-      {expanded && node.children.length > 0 && (
-        <div className="px-4 pb-3 space-y-2">
-          {node.children.map((child) => (
-            <SubGroupSection
-              key={child.resourceId || child.name}
-              node={child}
-              onSelectChannel={onSelectChannel}
-            />
-          ))}
         </div>
       )}
     </div>
   );
 }
 
-function ClientTreeView() {
-  const { data, isLoading, error, refetch } = useClientTree("FORTRESS");
+// --- Main Page ---
+
+export default function ChannelsPage() {
+  const [selectedName, setSelectedName] = useState<string | null>(null);
   const [selectedChannel, setSelectedChannel] = useState<ChannelCircleData | null>(null);
   const [filter, setFilter] = useState<ActivityFilter>("all");
+  const [mounted, setMounted] = useState(false);
 
-  // Flatten all channels from the tree for counting
-  const allChannels = useMemo(() => {
-    if (!data) return [];
-    const channels: ChannelCircleData[] = [];
-    function collect(node: ClientNode) {
-      for (const ch of node.channels) {
-        channels.push(ch);
-      }
-      for (const child of node.children) collect(child);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- hydration guard for Radix useId()
+  useEffect(() => setMounted(true), []);
+
+  const { data: tree, isLoading: treeLoading, error: treeError, refetch } = useClientTree("FORTRESS");
+
+  // Auto-poll scan every 10 minutes (aligned with server-side 600s cache TTL)
+  const { data: scanData, isLoading: scanLoading, freshRescan: rescan } = useChannelScan(true, { refetchInterval: 600_000 });
+
+  // Build scan lookup map
+  const scanMap = useMemo(() => {
+    if (!scanData?.results) return new Map<string, ScanInfo>();
+    const map = new Map<string, ScanInfo>();
+    for (const r of scanData.results) {
+      map.set(r.channelId, {
+        hasEvents: r.hasEvents,
+        eventCount: r.eventCount,
+        latestManagerReceiptTime: r.latestManagerReceiptTime ?? null,
+      });
     }
-    collect(data);
-    return channels;
-  }, [data]);
+    return map;
+  }, [scanData]);
+
+  // Extract client-level nodes from tree categories (2 levels deep):
+  // FORTRESS → categories (Device Monitoring, Incident Monitoring) → clients (Cadeploy)
+  const treeClients = useMemo(() => {
+    if (!tree) return [];
+    return tree.children.flatMap((category) => category.children);
+  }, [tree]);
+
+  // Auto-select first client when tree loads (if nothing selected yet)
+  useEffect(() => {
+    if (!selectedName && treeClients.length > 0) {
+      /* eslint-disable react-hooks/set-state-in-effect -- auto-select first client on initial load */
+      setSelectedName(treeClients[0].name);
+      /* eslint-enable react-hooks/set-state-in-effect */
+    }
+  }, [selectedName, treeClients]);
+
+  // Find the selected client node from the tree
+  const selectedClient = useMemo(() => {
+    if (!selectedName) return null;
+    return treeClients.find((c) => c.name === selectedName) ?? null;
+  }, [treeClients, selectedName]);
+
+  // Collect channel groups from the selected client
+  const channelGroups = useMemo((): ChannelGroup[] => {
+    if (!selectedClient) return [];
+    const groups: ChannelGroup[] = [];
+
+    // Sub-groups become device category sections
+    for (const child of selectedClient.children) {
+      if (child.channels.length > 0) {
+        groups.push({
+          name: child.name,
+          channels: child.channels.map((ch) => ({
+            ...ch,
+            groupName: child.name,
+          })),
+        });
+      }
+    }
+
+    // Direct channels on the client itself (not in a sub-group)
+    if (selectedClient.channels.length > 0) {
+      groups.push({
+        name: "General",
+        channels: selectedClient.channels.map((ch) => ({
+          ...ch,
+          groupName: "General",
+        })),
+      });
+    }
+
+    return groups;
+  }, [selectedClient]);
+
+  // Flatten all channels for the selected client for counting
+  const allChannels = useMemo(() => {
+    return channelGroups.flatMap((g) => g.channels);
+  }, [channelGroups]);
+
+  // --- Live multi-channel polling (up to 5 channels simultaneously) ---
+  const liveChannelIds = useMemo(
+    () => allChannels.slice(0, 5).map((ch) => ch.resourceId),
+    [allChannels]
+  );
+  const { data: liveData } = useMultiChannelLive(liveChannelIds);
+  useMultiChannelCleanup();
+
+  // Build combined scan+live map — live data only overrides when equal or better
+  const combinedScanMap = useMemo(() => {
+    const map = new Map<string, ScanInfo>(scanMap);
+    if (liveData?.channels) {
+      for (const [id, result] of Object.entries(liveData.channels)) {
+        let latestMrt: number | null = null;
+        for (const evt of result.events) {
+          const mrt = evt.fields["managerReceiptTime"];
+          const val = typeof mrt === "number" ? mrt : typeof mrt === "string" ? Number(mrt) : null;
+          if (val && !isNaN(val) && (latestMrt === null || val > latestMrt)) latestMrt = val;
+        }
+
+        const existing = map.get(id);
+        const liveHasData = result.events.length > 0;
+
+        // Only override scan data if live data is equal or better.
+        // Don't downgrade a channel from "has events" to "no events"
+        // when the lightweight subscribe hasn't warmed up yet.
+        if (liveHasData || !existing?.hasEvents) {
+          map.set(id, {
+            hasEvents: liveHasData,
+            eventCount: result.totalCount,
+            latestManagerReceiptTime: latestMrt,
+          });
+        } else if (existing && latestMrt !== null) {
+          // Live has 0 events but found a newer MRT — update just the timestamp
+          map.set(id, {
+            ...existing,
+            latestManagerReceiptTime: latestMrt,
+          });
+        }
+        // else: keep existing scan data (don't overwrite with worse data)
+      }
+    }
+    return map;
+  }, [scanMap, liveData]);
+
+  // Filtered channels per group
+  const filteredGroups = useMemo(() => {
+    if (filter === "all") return channelGroups;
+    return channelGroups
+      .map((g) => ({
+        ...g,
+        channels: g.channels.filter((ch) => {
+          const { status } = getChannelHealth(ch.lastUpdateTime, combinedScanMap.get(ch.resourceId));
+          return filter === "active" ? status === "healthy" : status === "unhealthy";
+        }),
+      }))
+      .filter((g) => g.channels.length > 0);
+  }, [channelGroups, filter, combinedScanMap]);
 
   const { active: activeCount, inactive: inactiveCount } = useMemo(() => {
     let active = 0;
     for (const ch of allChannels) {
-      if (getChannelHealth(ch.lastUpdateTime).status === "healthy") active++;
+      if (getChannelHealth(ch.lastUpdateTime, combinedScanMap.get(ch.resourceId)).status === "healthy") active++;
     }
     return { active, inactive: allChannels.length - active };
-  }, [allChannels]);
+  }, [allChannels, combinedScanMap]);
 
-  // Filter the tree by activity status
-  const filteredTree = useMemo(() => {
-    if (!data || filter === "all") return data;
-
-    function filterNode(node: ClientNode): ClientNode | null {
-      const filteredChannels = node.channels.filter((ch) => {
-        const { status } = getChannelHealth(ch.lastUpdateTime);
-        return filter === "active" ? status === "healthy" : status === "unhealthy";
-      });
-      const filteredChildren = node.children
-        .map((child) => filterNode(child))
-        .filter((c): c is ClientNode => c !== null);
-
-      if (filteredChannels.length === 0 && filteredChildren.length === 0) return null;
-      return { ...node, channels: filteredChannels, children: filteredChildren };
-    }
-
-    return filterNode(data);
-  }, [data, filter]);
-
-  // Get the "category" nodes (Device Monitoring, Incident Monitoring, etc.)
-  const categoryNodes = useMemo(() => {
-    if (!filteredTree) return [];
-    // If root has children, those are the categories
-    if (filteredTree.children.length > 0) return filteredTree.children;
-    // Otherwise the root itself is a category
-    return [filteredTree];
-  }, [filteredTree]);
+  const totalDevices = allChannels.length;
 
   return (
-    <>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h2 className="text-2xl font-bold">Channels</h2>
-          {data && (
-            <Badge
-              variant="outline"
-              className="bg-blue-500/15 text-blue-400 border-blue-500/20"
-            >
-              {allChannels.length} total
-            </Badge>
-          )}
+    <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Header */}
+      <header className="shrink-0 h-16 px-6 border-b border-white/10 flex items-center justify-between">
+        <div>
+          <h1 className="text-lg font-semibold text-white">Channels</h1>
+          <p className="text-xs text-gray-500">
+            Monitored devices from the channel tree for each client
+          </p>
         </div>
         <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1 p-1 bg-[#12121a] rounded-lg border border-white/10">
-            <button
-              onClick={() => setFilter("all")}
-              className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
-                filter === "all"
-                  ? "bg-white/10 text-white"
-                  : "text-gray-400 hover:text-white hover:bg-white/5"
-              }`}
-            >
-              All
-            </button>
-            <button
-              onClick={() => setFilter("active")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                filter === "active"
-                  ? "bg-green-500/20 text-green-400"
-                  : "text-gray-400 hover:text-white hover:bg-white/5"
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-green-500" />
-              Active ({activeCount})
-            </button>
-            <button
-              onClick={() => setFilter("inactive")}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                filter === "inactive"
-                  ? "bg-red-500/20 text-red-400"
-                  : "text-gray-400 hover:text-white hover:bg-white/5"
-              }`}
-            >
-              <span className="w-2 h-2 rounded-full bg-red-500" />
-              Inactive ({inactiveCount})
-            </button>
-          </div>
+          {scanLoading && (
+            <Badge variant="outline" className="bg-blue-500/10 text-blue-400 border-blue-500/20 text-xs">
+              <Loader2 className="w-3 h-3 animate-spin mr-1" />
+              Scanning...
+            </Badge>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={rescan}
+            disabled={scanLoading}
+            className="text-gray-400 hover:text-white gap-1.5"
+          >
+            <RefreshCw className={`w-4 h-4 ${scanLoading ? "animate-spin" : ""}`} />
+            Rescan
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -1001,135 +773,192 @@ function ClientTreeView() {
             <RefreshCw className="w-4 h-4" />
           </Button>
         </div>
-      </div>
+      </header>
 
-      {error && (
-        <div className="flex flex-col items-center gap-3 px-4 py-6 rounded-lg bg-red-500/10 border border-red-500/20">
-          <Activity className="w-6 h-6 text-red-400" />
-          <p className="text-sm text-red-300 text-center max-w-md">{error}</p>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={refetch}
-            className="text-gray-400 hover:text-white gap-1.5 mt-1"
-          >
-            <RefreshCw className="w-4 h-4" />
-            Retry
-          </Button>
-        </div>
-      )}
-
-      {isLoading ? (
-        <div className="space-y-4">
-          {Array.from({ length: 3 }).map((_, i) => (
-            <div key={i} className="rounded-xl border border-white/10 bg-[#12121a] p-5">
-              <div className="flex items-center gap-3 mb-4">
-                <Skeleton className="w-9 h-9 rounded-lg bg-white/10" />
-                <div className="space-y-2">
-                  <Skeleton className="h-4 w-32 bg-white/10" />
-                  <Skeleton className="h-3 w-48 bg-white/10" />
-                </div>
-              </div>
-              <div className="flex gap-5">
-                {Array.from({ length: 4 }).map((_, j) => (
-                  <div key={j} className="flex flex-col items-center gap-2">
-                    <Skeleton className="w-20 h-20 rounded-full bg-white/10" />
-                    <Skeleton className="h-3 w-16 bg-white/10" />
+      <main className="flex-1 overflow-y-auto p-6 space-y-6">
+        {/* Client selector + filter controls */}
+        <div className="flex items-center gap-4 flex-wrap">
+          <label className="text-sm text-gray-400 shrink-0">Client</label>
+          {mounted ? (
+            <Select
+              value={selectedName ?? ""}
+              onValueChange={(v) => setSelectedName(v || null)}
+            >
+              <SelectTrigger className="w-72 bg-[#12121a] border-white/10 text-white">
+                <SelectValue placeholder="Select a client..." />
+              </SelectTrigger>
+              <SelectContent className="bg-[#12121a] border-white/10 text-white">
+                {treeLoading ? (
+                  <div className="px-3 py-2 text-sm text-gray-500">
+                    Loading clients...
                   </div>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : categoryNodes.length > 0 ? (
-        <div className="space-y-6">
-          {categoryNodes.map((category) => (
-            <div key={category.resourceId || category.name}>
-              {/* Category header */}
-              <div className="flex items-center gap-2 mb-3">
-                <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">
-                  {category.name}
-                </h3>
-                <div className="flex-1 h-px bg-white/5" />
-              </div>
+                ) : (
+                  treeClients.map((client) => (
+                    <SelectItem key={client.resourceId} value={client.name}>
+                      {client.name}
+                    </SelectItem>
+                  ))
+                )}
+              </SelectContent>
+            </Select>
+          ) : (
+            <div className="h-9 w-72 rounded-md bg-[#12121a] border border-white/10" />
+          )}
 
-              {/* Client cards within this category */}
-              {category.children.length > 0 ? (
-                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                  {category.children.map((client) => (
-                    <ClientCard
-                      key={client.resourceId || client.name}
-                      node={client}
-                      onSelectChannel={setSelectedChannel}
-                    />
+          {selectedClient && (
+            <div className="flex items-center gap-3 text-sm text-gray-400">
+              <span className="flex items-center gap-1.5">
+                <FolderOpen className="w-3.5 h-3.5" />
+                {channelGroups.length} group{channelGroups.length !== 1 && "s"}
+              </span>
+              <span className="flex items-center gap-1.5">
+                <MonitorSmartphone className="w-3.5 h-3.5" />
+                {totalDevices} device{totalDevices !== 1 && "s"}
+              </span>
+            </div>
+          )}
+
+          {/* Activity filter — shown when client is selected */}
+          {selectedClient && (
+            <div className="flex items-center gap-1 p-1 bg-[#12121a] rounded-lg border border-white/10 ml-auto">
+              <button
+                onClick={() => setFilter("all")}
+                className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
+                  filter === "all"
+                    ? "bg-white/10 text-white"
+                    : "text-gray-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setFilter("active")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                  filter === "active"
+                    ? "bg-green-500/20 text-green-400"
+                    : "text-gray-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <span className="w-2 h-2 rounded-full bg-green-500" />
+                Active ({activeCount})
+              </button>
+              <button
+                onClick={() => setFilter("inactive")}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                  filter === "inactive"
+                    ? "bg-red-500/20 text-red-400"
+                    : "text-gray-400 hover:text-white hover:bg-white/5"
+                }`}
+              >
+                <span className="w-2 h-2 rounded-full bg-red-500" />
+                Inactive ({inactiveCount})
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Error state */}
+        {treeError && (
+          <div className="flex flex-col items-center gap-3 px-4 py-6 rounded-lg bg-red-500/10 border border-red-500/20">
+            <Activity className="w-6 h-6 text-red-400" />
+            <p className="text-sm text-red-300 text-center max-w-md">{treeError}</p>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={refetch}
+              className="text-gray-400 hover:text-white gap-1.5 mt-1"
+            >
+              <RefreshCw className="w-4 h-4" />
+              Retry
+            </Button>
+          </div>
+        )}
+
+        {/* Empty state: no client selected */}
+        {!selectedName && !treeLoading && !treeError && (
+          <div className="flex-1 flex flex-col items-center justify-center py-24 text-center">
+            <Activity className="w-12 h-12 text-gray-600 mb-4" />
+            <p className="text-gray-400 text-lg">
+              Select a client to view its devices
+            </p>
+            <p className="text-gray-600 text-sm mt-1">
+              Devices are discovered from the Phoenix channel tree
+            </p>
+          </div>
+        )}
+
+        {/* Loading skeletons */}
+        {treeLoading && (
+          <div className="space-y-4">
+            {[1, 2, 3].map((i) => (
+              <div
+                key={i}
+                className="rounded-lg border border-white/5 bg-[#0e0e18] p-4"
+              >
+                <div className="flex items-center gap-2 mb-4">
+                  <Skeleton className="h-4 w-4 bg-white/10" />
+                  <Skeleton className="h-4 w-32 bg-white/10" />
+                </div>
+                <div className="flex gap-5">
+                  {Array.from({ length: 5 }).map((_, j) => (
+                    <div key={j} className="flex flex-col items-center gap-2">
+                      <Skeleton className="w-20 h-20 rounded-full bg-white/10" />
+                      <Skeleton className="h-3 w-16 bg-white/10" />
+                    </div>
                   ))}
                 </div>
-              ) : category.channels.length > 0 ? (
-                <ClientCard
-                  node={category}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Channel group sections for selected client */}
+        {selectedClient && !treeLoading && (
+          <div className="space-y-3">
+            {filteredGroups.length === 0 ? (
+              <div className="text-center py-16 text-gray-500">
+                {filter !== "all"
+                  ? `No ${filter} devices — try switching to "All"`
+                  : "No devices found for this client"}
+              </div>
+            ) : (
+              filteredGroups.map((group) => (
+                <ChannelGroupSection
+                  key={group.name}
+                  group={group}
                   onSelectChannel={setSelectedChannel}
+                  scanMap={combinedScanMap}
                 />
-              ) : null}
-            </div>
-          ))}
-        </div>
-      ) : !error ? (
-        <div className="text-center py-12">
-          <Users className="w-10 h-10 text-gray-600 mx-auto mb-3" />
-          <p className="text-gray-500">
-            {filter !== "all"
-              ? `No ${filter} channels — try switching to "All"`
-              : "No client data found"}
-          </p>
-        </div>
-      ) : null}
+              ))
+            )}
+          </div>
+        )}
 
-      <p className="text-xs text-gray-600 text-center">
-        Client tree refreshes every 60s
-      </p>
+        {/* Footer status */}
+        <p className="text-xs text-gray-600 text-center">
+          {liveData?.liveCount
+            ? `${liveData.liveCount} channel${liveData.liveCount !== 1 ? "s" : ""} polled live (60s)`
+            : ""}
+          {liveData?.liveCount ? " · " : ""}
+          Scan every 10 min
+          {scanLoading && " (scanning...)"}
+          {scanData?.scannedAt && !scanLoading && (
+            <> &middot; Last scan: {new Date(scanData.scannedAt).toLocaleTimeString()}</>
+          )}
+          {!scanData && !scanLoading && !liveData && " · * = estimated (scan pending)"}
+        </p>
+      </main>
 
+      {/* Event sheet — pre-populated with live data if available */}
       <ChannelEventSheet
         channel={selectedChannel}
         onClose={() => setSelectedChannel(null)}
+        liveResult={
+          selectedChannel && liveData?.channels?.[selectedChannel.resourceId]
+            ? liveData.channels[selectedChannel.resourceId]
+            : null
+        }
       />
-    </>
-  );
-}
-
-type ViewMode = "clients" | "canvas";
-
-export default function ChannelsPage() {
-  const [view, setView] = useState<ViewMode>("clients");
-
-  return (
-    <>
-      {/* View toggle */}
-      <div className="flex items-center gap-1 p-1 bg-[#12121a] rounded-lg border border-white/10 w-fit">
-        <button
-          onClick={() => setView("clients")}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-            view === "clients"
-              ? "bg-red-600/20 text-red-400"
-              : "text-gray-400 hover:text-white hover:bg-white/5"
-          }`}
-        >
-          <Users className="w-3.5 h-3.5" />
-          Clients
-        </button>
-        <button
-          onClick={() => setView("canvas")}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-            view === "canvas"
-              ? "bg-blue-600/20 text-blue-400"
-              : "text-gray-400 hover:text-white hover:bg-white/5"
-          }`}
-        >
-          <LayoutGrid className="w-3.5 h-3.5" />
-          Canvas
-        </button>
-      </div>
-
-      {view === "clients" ? <ClientTreeView /> : <ChannelCanvasView />}
-    </>
+    </div>
   );
 }

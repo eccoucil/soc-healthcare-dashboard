@@ -1,12 +1,18 @@
 import { getAllConnectors } from "@/lib/arcsight-client";
+import { withAuthRetry, AuthError } from "@/lib/session";
 
 export async function GET() {
   try {
-    const connectors = await getAllConnectors();
-    return Response.json(connectors, {
-      headers: { "Cache-Control": "no-store" },
+    const { data: connectors, cookieHeader } = await withAuthRetry(async (auth) => {
+      return getAllConnectors(auth);
     });
+    const headers: Record<string, string> = { "Cache-Control": "no-store" };
+    if (cookieHeader) headers["Set-Cookie"] = cookieHeader;
+    return Response.json(connectors, { headers });
   } catch (error) {
+    if (error instanceof AuthError) {
+      return Response.json({ error: "Not authenticated" }, { status: 401 });
+    }
     return Response.json(
       { error: error instanceof Error ? error.message : "Unknown error" },
       { status: 500 }
