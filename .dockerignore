@@ -1,0 +1,41 @@
+# Dependencies
+**/node_modules
+
+# Build output
+**/.next
+**/.turbo
+
+# Version control
+.git
+.gitignore
+
+# Environment files
+.env*
+!frontend/.env.example
+
+# Documentation & specs
+specs/
+docs/
+*.md
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude
+.claude/
+
+# Testing & Playwright
+**/__tests__/
+**/coverage/
+**/playwright-report/
+**/test-results/
+**/*.test.ts
+**/*.spec.ts
+frontend/playwright.config.ts
+
+# OS files
+.DS_Store
+Thumbs.db
