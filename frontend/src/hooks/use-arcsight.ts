@@ -51,6 +51,7 @@ function useArcsightQuery<T>(
   const [trigger, setTrigger] = useState(0);
   const hasFetched = useRef(false);
   const fetchingRef = useRef(false);
+  const authFailedRef = useRef(false);
   const isVisible = usePageVisible();
 
   // Derived loading state to catch the first render of a new URL
@@ -79,7 +80,11 @@ function useArcsightQuery<T>(
     fetch(url)
       .then(async (res) => {
         if (res.status === 401) {
-          window.location.href = "/";
+          authFailedRef.current = true;
+          // Clear session cookie so middleware won't redirect back to /dashboard
+          fetch("/api/auth/logout", { method: "POST" })
+            .catch(() => {})
+            .finally(() => { window.location.href = "/"; });
           throw new Error("Session expired");
         }
         if (!res.ok) {
@@ -115,7 +120,7 @@ function useArcsightQuery<T>(
   useEffect(() => {
     if (!url || !options?.refetchInterval || !isVisible) return;
     const id = setInterval(() => {
-      if (!fetchingRef.current) refetch();
+      if (!fetchingRef.current && !authFailedRef.current) refetch();
     }, options.refetchInterval);
     return () => clearInterval(id);
   }, [url, options?.refetchInterval, refetch, isVisible]);

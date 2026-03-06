@@ -204,17 +204,23 @@ export async function refreshSession(): Promise<{
 export async function withAuthRetry<T>(
   fn: (auth: SessionAuth) => Promise<T>
 ): Promise<{ data: T; cookieHeader?: string }> {
-  const auth = await requireAuth();
-
   try {
+    const auth = await requireAuth();
     const data = await fn(auth);
     return { data };
   } catch (error) {
-    if (!isTokenExpiredError(error)) throw error;
+    // Retry on: session TTL expired (AuthError) OR ArcSight token rejected (401/Unauthorized)
+    if (!(error instanceof AuthError) && !isTokenExpiredError(error)) throw error;
 
-    console.log("[session] 401 detected, refreshing tokens...");
-    const { auth: newAuth, cookieHeader } = await refreshSession();
-    const data = await fn(newAuth);
-    return { data, cookieHeader };
+    console.log("[session] Auth failed, attempting token refresh...");
+    try {
+      const { auth: newAuth, cookieHeader } = await refreshSession();
+      const data = await fn(newAuth);
+      return { data, cookieHeader };
+    } catch (refreshError) {
+      // Refresh failed — throw AuthError so route returns 401
+      if (refreshError instanceof AuthError) throw refreshError;
+      throw new AuthError("Token refresh failed");
+    }
   }
 }
