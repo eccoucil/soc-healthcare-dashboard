@@ -8,6 +8,8 @@ const cacheByRoot = new Map<string, ReturnType<typeof createServerCache>>();
 function getCacheForRoot(root: string) {
   let cache = cacheByRoot.get(root);
   if (!cache) {
+    // Evict all entries when map grows beyond normal usage (1-2 roots)
+    if (cacheByRoot.size >= 10) cacheByRoot.clear();
     cache = createServerCache(300_000);
     cacheByRoot.set(root, cache);
   }

@@ -13,6 +13,8 @@ const cacheById = new Map<string, ReturnType<typeof createServerCache>>();
 function getCacheForClient(id: string) {
   let cache = cacheById.get(id);
   if (!cache) {
+    // Evict all entries when map grows beyond normal usage (2-3 clients)
+    if (cacheById.size >= 50) cacheById.clear();
     cache = createServerCache(60_000);
     cacheById.set(id, cache);
   }

@@ -1,6 +1,6 @@
 # Prime Summary: ECC-SOC 24/7
 
-> Generated on: 2026-03-04
+> Generated on: 2026-03-10 (updated)
 > Analyzer: Claude Code — Prime Command
 
 ---
@@ -66,9 +66,9 @@ soc-healthcare-dashboard/
 ├── frontend/                              # Next.js 16 application (ALL code lives here)
 │   ├── src/
 │   │   ├── app/
-│   │   │   ├── api/arcsight/             # 30 API routes (REST/GWT-RPC proxies)
+│   │   │   ├── api/arcsight/             # 31 API routes (REST/GWT-RPC proxies)
 │   │   │   │   ├── channels/             # 11 routes — channel listing, tree, scan, live, events
-│   │   │   │   ├── clients/              # 4 routes — CRUD + connector linking
+│   │   │   │   ├── clients/              # 5 routes — CRUD + connector linking + compare
 │   │   │   │   ├── connectors/           # 5 routes — health, devices, agent fields
 │   │   │   │   ├── reports/              # 6 routes — tree, run, archives, download
 │   │   │   │   ├── events/               # 3 routes — listing, search, details
@@ -83,20 +83,20 @@ soc-healthcare-dashboard/
 │   │   │   ├── auth-page.tsx             # Login UI
 │   │   │   └── matrix-background.tsx     # Three.js animated background
 │   │   ├── hooks/
-│   │   │   ├── use-arcsight.ts           # 16 query + 3 mutation hooks (613 lines)
+│   │   │   ├── use-arcsight.ts           # 16 query + 3 mutation hooks
 │   │   │   └── use-mobile.ts
 │   │   ├── lib/
-│   │   │   ├── arcsight-channel-client.ts  # GWT-RPC client (5,521 lines — largest file)
-│   │   │   ├── arcsight-query-client.ts    # Query/search layer (814 lines)
-│   │   │   ├── arcsight-client.ts          # REST client (525 lines)
-│   │   │   ├── gwt-rpc-codec.ts            # GWT wire format encoder/decoder (393 lines)
-│   │   │   ├── session.ts                  # Session encryption, auth retry (220 lines)
-│   │   │   ├── arcsight-dispatcher.ts      # Proxy/connection pool factory (123 lines)
-│   │   │   ├── server-cache.ts             # TTL cache with inflight dedup (38 lines)
+│   │   │   ├── arcsight-channel-client.ts  # GWT-RPC client (largest file)
+│   │   │   ├── arcsight-query-client.ts    # Query/search layer
+│   │   │   ├── arcsight-client.ts          # REST client
+│   │   │   ├── gwt-rpc-codec.ts            # GWT wire format encoder/decoder
+│   │   │   ├── session.ts                  # Session encryption, auth retry
+│   │   │   ├── arcsight-dispatcher.ts      # Proxy/connection pool factory
+│   │   │   ├── server-cache.ts             # TTL cache with inflight dedup
 │   │   │   ├── password-validation.ts      # Sanitization + strength scoring
 │   │   │   └── utils.ts                    # cn() utility
-│   │   ├── types/arcsight.ts             # 14 TypeScript interfaces (112 lines)
-│   │   └── middleware.ts                 # Auth guard (19 lines)
+│   │   ├── types/arcsight.ts             # 14 TypeScript interfaces
+│   │   └── middleware.ts                 # Auth guard
 │   ├── scripts/warm-up-routes.mjs        # Pre-warms API routes on dev start
 │   ├── package.json
 │   ├── jest.config.ts
@@ -105,6 +105,8 @@ soc-healthcare-dashboard/
 ├── .claude/                              # 13 specialist agents + agent memory
 │   ├── agents/                           # auth, groups, events, reports, frontend, etc.
 │   └── commands/                         # implement, research, bug, chore, prime, feature
+├── Dockerfile                            # Multi-stage build (node:18-alpine)
+├── docker-compose.yml                    # Single service with healthcheck
 ├── CLAUDE.md                             # Project instructions (~400 lines)
 └── README.md
 ```
@@ -127,7 +129,7 @@ soc-healthcare-dashboard/
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/session` | Session metadata |
 
-### ArcSight Proxy Routes (30)
+### ArcSight Proxy Routes (31)
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -135,6 +137,7 @@ soc-healthcare-dashboard/
 | GET | `/api/arcsight/clients/[id]` | Single client |
 | GET,POST,DELETE | `/api/arcsight/clients/[id]/connectors` | Client connectors + link/unlink |
 | GET | `/api/arcsight/clients/[id]/debug` | Connector resolution diagnostic |
+| GET | `/api/arcsight/clients/compare` | Client comparison |
 | GET | `/api/arcsight/connectors` | All connectors |
 | GET | `/api/arcsight/connectors/health` | Live/dead health |
 | GET | `/api/arcsight/connectors/health/detailed` | Enriched health with names |
@@ -162,7 +165,7 @@ soc-healthcare-dashboard/
 | GET | `/api/arcsight/events/details` | Full event details (~450 CEF fields) |
 | GET | `/api/arcsight/proxy-status` | Proxy configuration status |
 
-**Total endpoints**: 33 (30 ArcSight + 3 auth)
+**Total endpoints**: 34 (31 ArcSight + 3 auth)
 
 ## 7. Data Models
 
@@ -278,9 +281,9 @@ soc-healthcare-dashboard/
 
 ## 13. Deployment
 
-- **Platform**: Not detected (no Vercel/Netlify/Docker config)
+- **Docker**: Multi-stage build (`Dockerfile`) — node:18-alpine, standalone output, dumb-init, non-root user
+- **Compose**: `docker-compose.yml` — single service, port 3000, healthcheck (wget), cert volume mount
 - **CI/CD**: Not detected (no `.github/workflows/`)
-- **Docker**: Not present
 - **Production env**: `.env.production` exists (different ArcSight server)
 
 ## 14. Patterns & Conventions
@@ -293,16 +296,20 @@ soc-healthcare-dashboard/
 - **API routes**: All return `Cache-Control: no-store`, use `withAuthRetry()`, propagate `Set-Cookie` on token refresh
 - **Polling**: `useArcsightQuery<T>()` with configurable intervals — connector health 15s, clients 30s, channels 60s, events 10s
 - **Batch size**: 50 IDs per bulk ArcSight API call
+- **Connection pools**: REST 6-conn, GWT-RPC 4-conn (right-sized to match BATCH_CONCURRENCY)
+- **Server-side caches**: Bounded — route caches evict at size thresholds, channelMetadataCache caps at 500 entries
+- **Session management**: Single ESM session per scan (not per-window) to prevent orphaned session leaks
 
 ## 15. Tech Debt & Issues
 
 - **TODOs/FIXMEs**: 0
 - **Test coverage**: Only 1 test file — no route handler, hook, or component tests
 - **No CI/CD pipeline**: No automated build/lint/test on push
-- **Largest file**: `arcsight-channel-client.ts` at 5,521 lines — handles 5 different GWT-RPC services, could be split
-- **3 lint warnings**: 2 intentionally unused `_auth` params in discovery functions, 1 unused import in query client
+- **Largest file**: `arcsight-channel-client.ts` (5,620 lines) — handles 5 different GWT-RPC services + channel scan + enrichment, could benefit from modular extraction
+- **Supabase remnants**: `@supabase/ssr` and `@supabase/supabase-js` still referenced in CLAUDE.md but auth was replaced with custom AES-256-GCM session cookies. Supabase deps removed from package.json, client files removed.
 - **No database**: All state is in ArcSight ESM — no local persistence layer
 - **No E2E tests**: Playwright installed but only used for ArcSight ACC UI reverse-engineering research
+- **ESM resource management**: Recent mitigations (single-session scans, bounded caches, right-sized pools) address observed Grafana spikes
 
 ## 16. Quick Reference
 
@@ -313,21 +320,24 @@ soc-healthcare-dashboard/
 | Build | `cd frontend && npm run build` |
 | Lint | `cd frontend && npm run lint` |
 | Add shadcn component | `cd frontend && npx shadcn@latest add <name>` |
+| Docker build | `docker compose build` |
+| Docker run | `docker compose up -d` |
 
 ## 17. Codebase Metrics
 
 | Metric | Count |
 |--------|-------|
 | Source files (.ts/.tsx) | 75 |
-| API routes | 33 (30 ArcSight + 3 auth) |
-| Dashboard pages | 7 |
-| React hooks | 19 (16 query + 3 mutation) |
+| API routes (route.ts files) | 34 (31 ArcSight + 3 auth) |
+| Dashboard pages | 7 (6 page.tsx + 1 layout.tsx) |
+| React hooks | 25 (22 query + 3 mutation) |
 | UI components (shadcn) | 17 |
 | Data models | 16 |
 | Test files | 1 |
-| Total lines (key files) | 8,378 |
+| Lines of code (lib/) | 8,073 |
+| Largest file | arcsight-channel-client.ts (5,620 lines) |
 | Environment variables | 18 |
-| Claude agents | 13 |
+| Claude specialist agents | 13 |
 
 ---
 

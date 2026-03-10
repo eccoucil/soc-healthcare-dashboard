@@ -69,6 +69,8 @@ pnpm-debug.log*
 # Project-specific
 .claude/
 .playwright-mcp/
-frontend/.playwright-mcp/
 swagger.json
 frontend/dashboard-main.png
+
+# Certificates (mounted at runtime via docker-compose)
+certs/

@@ -91,9 +91,42 @@ function cacheChannelMetadata(
   channels: { resourceId: string; path: string }[],
   parentGroupId: string
 ): void {
+  // Evict stale entries from reorganized channels — keeps memory bounded
+  if (channelMetadataCache.size > 500) channelMetadataCache.clear();
   for (const ch of channels) {
     channelMetadataCache.set(ch.resourceId, { parentGroupId, path: ch.path });
   }
+}
+
+// --- Static constants for device enrichment (hoisted to module scope to avoid per-scan re-allocation) ---
+
+/** Known device keyword map — used by both connector matching and channel-name inference */
+const DEVICE_NAME_MAP: ReadonlyArray<{ keywords: string[]; vendor: string; product: string }> = [
+  { keywords: ["fortigate"], vendor: "Fortinet", product: "FortiGate" },
+  { keywords: ["fortinet"], vendor: "Fortinet", product: "FortiGate" },
+  { keywords: ["sentinelone", "sentinel one", "sentinel-one"], vendor: "SentinelOne", product: "Mgmt" },
+  { keywords: ["dell_emc", "dell emc", "emc unity"], vendor: "Dell Technologies", product: "EMC Unity" },
+  { keywords: ["addc", "pdc", "adc"], vendor: "Microsoft", product: "Microsoft Windows" },
+  { keywords: ["palo alto", "paloalto", "pan-os"], vendor: "Palo Alto Networks", product: "PAN-OS" },
+  { keywords: ["cisco asa", "cisco-asa"], vendor: "Cisco", product: "ASA" },
+  { keywords: ["cisco firepower"], vendor: "Cisco", product: "Firepower" },
+  { keywords: ["sophos"], vendor: "Sophos", product: "Sophos Firewall" },
+  { keywords: ["checkpoint", "check point"], vendor: "Check Point", product: "Check Point Firewall" },
+  { keywords: ["juniper", "srx"], vendor: "Juniper Networks", product: "Juniper SRX" },
+  { keywords: ["crowdstrike", "falcon"], vendor: "CrowdStrike", product: "Falcon" },
+  { keywords: ["mcafee", "trellix"], vendor: "Trellix", product: "ENS" },
+  { keywords: ["symantec", "broadcom"], vendor: "Broadcom", product: "Symantec Endpoint" },
+  { keywords: ["windows", "server"], vendor: "Microsoft", product: "Microsoft Windows" },
+  { keywords: ["linux", "ubuntu", "centos", "rhel"], vendor: "Linux", product: "Linux OS" },
+] as const;
+
+/** Generic words excluded from location-token matching */
+const GENERIC_WORDS = new Set(["the", "and", "for", "all", "new", "old"]);
+
+/** Extract meaningful tokens from a string for location-token matching */
+function extractMatchTokens(s: string): Set<string> {
+  const tokens = s.toLowerCase().replace(/[().\-_]/g, " ").split(/\s+/).filter(t => t.length >= 3);
+  return new Set(tokens);
 }
 
 // GWT module base — shared across all Phoenix GWT-RPC services.
@@ -103,8 +136,10 @@ const MODULE_BASE = PHOENIX_URL
   : "";
 
 // Separate connection pool for Phoenix (GWT-RPC endpoint) — routes through proxy if configured.
+// Connection pool sized to match BATCH_CONCURRENCY (4). Extra idle connections
+// consume ESM thread pool slots for no benefit since we never run >4 concurrent requests.
 const phoenixDispatcher = createArcsightDispatcher({
-  connections: 8,
+  connections: 4,
   pipelining: 1,
   connectTimeout: 15_000,
 });
@@ -3444,6 +3479,12 @@ export async function scanAllChannelEventsWithSubscription(
   const scanStart = Date.now();
 
   try {
+    // Clear stale tracking from previous scan cycles.
+    // stopViewChannel is broken on this ESM, so these accumulate forever.
+    // Must NOT clear livePolledChannels — those are managed by live polling separately.
+    subscribedChannels.clear();
+    channelBucketTokens.clear();
+
     console.log("[channel-scan-v2] Discovering channels...");
     const { groups } = await getAllActiveChannels(auth);
 
@@ -3535,9 +3576,12 @@ export async function scanAllChannelEventsWithSubscription(
     const totalWindows = Math.ceil(channelsToScan.length / WINDOW_SIZE);
     console.log(`[channel-scan-v2] Scanning ${channelsToScan.length} channel(s) in ${totalWindows} window(s) of ${WINDOW_SIZE} (${liveCount} live-polled, ${channels.length - channelsToScan.length} skipped)...`);
 
+    // Mutable accumulator — avoids O(n^2) spread copies across windows
+    const progressResults: ChannelScanResult[] = [];
+
     // Initialize progressive scan progress
     scanProgress = {
-      results: [],
+      results: progressResults,
       totalChannels: channelsToScan.length,
       scannedChannels: 0,
       windowsCompleted: 0,
@@ -3546,16 +3590,18 @@ export async function scanAllChannelEventsWithSubscription(
       isComplete: false,
     };
 
-    for (let w = 0; w < channelsToScan.length; w += WINDOW_SIZE) {
-      // Force fresh session for each window.
-      // stopViewChannel is broken on this ESM — channels from previous windows
-      // (or other concurrent requests) are never closed. Fresh login = 0 open channels.
-      if (freshPhoenixLogin) {
-        const fresh = await freshPhoenixLogin();
-        token = fresh.token;
-        sessionCookies = fresh.cookies;
-      }
+    // Single fresh session for the entire scan — avoids creating 7 orphaned ESM sessions
+    // (one per window) that never get cleaned up since stopViewChannel is broken.
+    // If >50% of a window hits MaxChannelExceededException, we do a mid-scan re-login.
+    let maxChExceededInWindow = 0;
+    let windowChannelCount = 0;
+    if (freshPhoenixLogin) {
+      const fresh = await freshPhoenixLogin();
+      token = fresh.token;
+      sessionCookies = fresh.cookies;
+    }
 
+    for (let w = 0; w < channelsToScan.length; w += WINDOW_SIZE) {
       const window = channelsToScan.slice(w, w + WINDOW_SIZE);
       const windowNum = Math.floor(w / WINDOW_SIZE) + 1;
       console.log(`[channel-scan-v2] Window ${windowNum}/${totalWindows}: ${window.length} channel(s)`);
@@ -3599,6 +3645,22 @@ export async function scanAllChannelEventsWithSubscription(
             errorMap.set(ch.channelId, r.reason instanceof Error ? r.reason.message : String(r.reason));
           }
         }
+      }
+
+      // --- Mid-scan re-login: if >50% of this window hit MaxChannelExceededException,
+      // the session is saturated. Get a fresh session for remaining windows.
+      maxChExceededInWindow = window.filter(ch => {
+        const err = errorMap.get(ch.channelId);
+        return err && err.includes("MaxChannelExceededException");
+      }).length;
+      windowChannelCount = window.length;
+      if (maxChExceededInWindow > windowChannelCount / 2 && freshPhoenixLogin) {
+        console.log(
+          `[channel-scan-v2] Window ${windowNum}: ${maxChExceededInWindow}/${windowChannelCount} hit MaxChannelExceededException — mid-scan re-login`
+        );
+        const fresh = await freshPhoenixLogin();
+        token = fresh.token;
+        sessionCookies = fresh.cookies;
       }
 
       // --- Pass 2: Poll channels in this window that need events ---
@@ -3719,9 +3781,11 @@ export async function scanAllChannelEventsWithSubscription(
           eventFields: ef && Object.keys(ef).length > 0 ? ef : undefined,
         };
       });
+      // Push into mutable accumulator — O(n) total vs O(n^2) from spread copies
+      progressResults.push(...windowResults);
       const scannedSoFar = Math.min(w + WINDOW_SIZE, channelsToScan.length);
       scanProgress = {
-        results: [...(scanProgress?.results ?? []), ...windowResults],
+        results: progressResults,
         totalChannels: channelsToScan.length,
         scannedChannels: scannedSoFar,
         windowsCompleted: windowNum,
@@ -3884,35 +3948,20 @@ export async function scanAllChannelEventsWithSubscription(
       }
     }
 
-    // --- Known device keyword map (used by both connector matching and channel-name inference) ---
-    const DEVICE_NAME_MAP: Array<{ keywords: string[]; vendor: string; product: string }> = [
-      { keywords: ["fortigate"], vendor: "Fortinet", product: "FortiGate" },
-      { keywords: ["fortinet"], vendor: "Fortinet", product: "FortiGate" },
-      { keywords: ["sentinelone", "sentinel one", "sentinel-one"], vendor: "SentinelOne", product: "Mgmt" },
-      { keywords: ["dell_emc", "dell emc", "emc unity"], vendor: "Dell Technologies", product: "EMC Unity" },
-      { keywords: ["addc", "pdc", "adc"], vendor: "Microsoft", product: "Microsoft Windows" },
-      { keywords: ["palo alto", "paloalto", "pan-os"], vendor: "Palo Alto Networks", product: "PAN-OS" },
-      { keywords: ["cisco asa", "cisco-asa"], vendor: "Cisco", product: "ASA" },
-      { keywords: ["cisco firepower"], vendor: "Cisco", product: "Firepower" },
-      { keywords: ["sophos"], vendor: "Sophos", product: "Sophos Firewall" },
-      { keywords: ["checkpoint", "check point"], vendor: "Check Point", product: "Check Point Firewall" },
-      { keywords: ["juniper", "srx"], vendor: "Juniper Networks", product: "Juniper SRX" },
-      { keywords: ["crowdstrike", "falcon"], vendor: "CrowdStrike", product: "Falcon" },
-      { keywords: ["mcafee", "trellix"], vendor: "Trellix", product: "ENS" },
-      { keywords: ["symantec", "broadcom"], vendor: "Broadcom", product: "Symantec Endpoint" },
-      { keywords: ["windows", "server"], vendor: "Microsoft", product: "Microsoft Windows" },
-      { keywords: ["linux", "ubuntu", "centos", "rhel"], vendor: "Linux", product: "Linux OS" },
-    ];
-
     // --- Connector metadata enrichment ---
+    // DEVICE_NAME_MAP is defined at module scope to avoid per-scan re-allocation.
     // Two passes: (1) device metadata for channels missing deviceVendor/deviceProduct
     // (2) agentName for ALL channels missing it (ungated — agent name comes from
     // connector registration, not events, so it's available even when device fields exist)
-    const needsDeviceMetadata = results.filter(r =>
+    //
+    // Only enrich freshly scanned results — reused cached results were already enriched.
+    const reusedIds = new Set(reusedResults.map(r => r.channelId));
+    const freshResults = results.filter(r => !reusedIds.has(r.channelId));
+    const needsDeviceMetadata = freshResults.filter(r =>
       r.eventFields &&
       (!r.eventFields.deviceVendor || !r.eventFields.deviceProduct)
     );
-    const needsAgentName = results.filter(r =>
+    const needsAgentName = freshResults.filter(r =>
       r.eventFields &&
       !r.eventFields.agentName
     );
@@ -4009,13 +4058,9 @@ export async function scanAllChannelEventsWithSubscription(
         // B. Device keyword + location token: channel has a known device keyword AND shares
         //    a location token (3+ char word like "HYD") with the connector name
         // C. Device map match: via deviceVendor/deviceProduct when DETECT API has data
-        const extractTokens = (s: string): Set<string> => {
-          // Split on spaces, hyphens, parens, dots — keep tokens ≥ 3 chars
-          const tokens = s.toLowerCase().replace(/[().\-_]/g, " ").split(/\s+/).filter(t => t.length >= 3);
-          return new Set(tokens);
-        };
+        // extractTokens and GENERIC_WORDS are hoisted to module scope to avoid per-scan re-allocation.
 
-        const stillNeedsAgent = results.filter(r =>
+        const stillNeedsAgent = freshResults.filter(r =>
           r.eventFields && !r.eventFields.agentName
         );
         if (stillNeedsAgent.length > 0 && connectorNameMap.size > 0) {
@@ -4081,18 +4126,17 @@ export async function scanAllChannelEventsWithSubscription(
               // If the channel label contains a known device keyword, find a connector
               // that shares a location token (e.g., "HYD" in both "fortigate firewall hyd"
               // and "Codeploy-HYD-FW")
-              const channelTokens = extractTokens(channelLabel);
+              const channelTokens = extractMatchTokens(channelLabel);
               const hasDeviceKeyword = DEVICE_NAME_MAP.some(entry =>
                 entry.keywords.some(kw => channelLabel.includes(kw))
               );
 
               if (hasDeviceKeyword) {
                 for (const [, cName] of connectorNameMap) {
-                  const connectorTokens = extractTokens(cName);
-                  // Find shared tokens, excluding common generic words
-                  const GENERIC = new Set(["the", "and", "for", "all", "new", "old"]);
+                  const connectorTokens = extractMatchTokens(cName);
+                  // Find shared tokens, excluding common generic words (GENERIC_WORDS at module scope)
                   const shared = [...channelTokens].filter(t =>
-                    connectorTokens.has(t) && !GENERIC.has(t)
+                    connectorTokens.has(t) && !GENERIC_WORDS.has(t)
                   );
 
                   if (shared.length > 0) {
@@ -4123,8 +4167,8 @@ export async function scanAllChannelEventsWithSubscription(
     // connector enrichment returns 0 devices, infer from the channel display name.
     // Channel names in this deployment follow the pattern "NN. <Device> <Location>"
     // (e.g., "01. Fortigate Firewall HYD", "06. Cadeploy-SentinelOne(HYD)").
-    // DEVICE_NAME_MAP is defined at the top of this function, before enrichment.
-    const stillNeedsMetadata = results.filter(r =>
+    // DEVICE_NAME_MAP is defined at module scope.
+    const stillNeedsMetadata = freshResults.filter(r =>
       r.eventFields && (!r.eventFields.deviceVendor || !r.eventFields.deviceProduct)
     );
 
