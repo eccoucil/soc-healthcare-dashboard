@@ -81,9 +81,9 @@ function getDeviceHealth(
         source: "scan",
       };
     }
-    // Scan found events but couldn't extract a timestamp — assume active
+    // Scan found events but couldn't extract a timestamp — mark inactive
     if (scanInfo.hasEvents) {
-      return { status: "healthy", source: "scan" };
+      return { status: "unhealthy", source: "scan" };
     }
     // Inconclusive: scan got 0 events and no MRT. The subscription may not
     // have warmed up in time (cold-start issue for slow channels). Don't

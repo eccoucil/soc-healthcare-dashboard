@@ -1146,7 +1146,7 @@ function parseChannelResult(decoded: GwtRpcDecodedResponse): ChannelResult {
   const longTypeIdx = stringTable.findIndex(s => s.startsWith("java.lang.Long/"));
   const longRef = longTypeIdx >= 0 ? longTypeIdx + 1 : -1;
 
-  const fvHitCount = SCAN_DEBUG && fvRef > 0 ? values.filter(v => v === fvRef).length : 0;
+  const fvHitCount = fvRef > 0 ? values.filter(v => v === fvRef).length : 0;
   if (SCAN_DEBUG) {
     console.log(
       `[channel-result-diag] fvRef=${fvRef} (fvTypeIdx=${fvTypeIdx}), longRef=${longRef}. ` +
@@ -1188,8 +1188,10 @@ function parseChannelResult(decoded: GwtRpcDecodedResponse): ChannelResult {
       if (fieldName) {
         let val = getVal(i - 3); // Primary value slot
         // Long values occupy 2 slots [encodedString, longRef], shifting value back by 1.
-        // If getVal returned the longRef type descriptor, the real value is at i-4.
-        if (val === longRef && longRef > 0) {
+        // Check the RAW value at i-3: if it IS the longRef index, the actual Long
+        // is at i-4 (the encoded string that getVal would decode).
+        const rawAt3 = values[i - 3];
+        if (longRef > 0 && rawAt3 === longRef) {
           val = getVal(i - 4);
         }
         currentEvent[fieldName] = val;
@@ -1224,16 +1226,18 @@ function parseChannelResult(decoded: GwtRpcDecodedResponse): ChannelResult {
   }
 
   // --- Compute data-section timestamps (always, regardless of events) ---
-  // Only use Longs from the data section (after all FieldInfo markers).
-  // Metadata Longs (channel creation/modification timestamps) appear before
-  // FieldInfo markers and must be excluded to prevent contamination.
+  // When hasBucket is true, the response contains ChannelBucket data with real
+  // MRT timestamps throughout the values array. Use ALL Longs in that case.
+  // When hasBucket is false, only use Longs after the last FieldInfo marker
+  // to exclude metadata Longs (channel creation/modification timestamps).
   let lastFiPos = -1;
   for (const pos of fieldInfoPosMap.keys()) {
     if (pos > lastFiPos) lastFiPos = pos;
   }
   const dataLongs: number[] = [];
   if (allLongs.length > 0) {
-    for (let i = Math.max(0, lastFiPos + 1); i < values.length - 1; i++) {
+    const startPos = hasBucket ? 0 : Math.max(0, lastFiPos + 1);
+    for (let i = startPos; i < values.length - 1; i++) {
       if (typeof values[i] === "string" && values[i + 1] === longRef) {
         const dv = decodeGwtLong(values[i] as string);
         if (!isNaN(dv) && dv > 0) dataLongs.push(dv);
@@ -1389,7 +1393,10 @@ function parseChannelResult(decoded: GwtRpcDecodedResponse): ChannelResult {
     }
   }
 
-  const isFallbackOnly = events.length <= 1 && fieldsInCurrent === 0 && fvHitCount === 0;
+  // When hasBucket is true, the response contains real ChannelBucket data with
+  // event timestamps — even if FieldValue extraction couldn't parse individual
+  // events, the data-section Longs are real MRT timestamps, not metadata.
+  const isFallbackOnly = events.length <= 1 && fieldsInCurrent === 0 && fvHitCount === 0 && !hasBucket;
   return { events, totalCount: events.length, fieldNames, eventIds, isFilterExpressionOnly: isFallbackOnly, latestDataTimestamp };
 }
 
@@ -1668,32 +1675,31 @@ const FULL_SCAN_EVERY_N = 3; // Do a full (non-incremental) scan every 3rd cycle
  */
 function extractLatestManagerReceiptTime(parsed: ChannelResult): number | null {
   let latest: number | null = null;
-  for (const event of parsed.events) {
-    const mrt = event.fields["managerReceiptTime"];
-    let value: number | null = null;
-    if (typeof mrt === "number" && mrt > 0) {
-      value = mrt;
-    } else if (typeof mrt === "string" && mrt.length > 0) {
-      // Try plain numeric string first (e.g. "1740373197000")
-      const parsed_num = Number(mrt);
-      if (!isNaN(parsed_num) && parsed_num > 0) {
-        value = parsed_num;
-      } else {
-        // Try GWT base-64 Long decoding (e.g. "ZyGFEAA")
-        const gwt_val = decodeGwtLong(mrt);
-        if (!isNaN(gwt_val) && gwt_val > 0) {
-          value = gwt_val;
-        }
-      }
+
+  function decodeTimestampField(raw: string | number | null | undefined): number | null {
+    if (typeof raw === "number" && raw > 0) return raw;
+    if (typeof raw === "string" && raw.length > 0) {
+      const num = Number(raw);
+      if (!isNaN(num) && num > 0) return num;
+      const gwt = decodeGwtLong(raw);
+      if (!isNaN(gwt) && gwt > 0) return gwt;
     }
+    return null;
+  }
+
+  for (const event of parsed.events) {
+    // Prefer managerReceiptTime; fall back to endTime (some FieldSets use it instead)
+    const value = decodeTimestampField(event.fields["managerReceiptTime"])
+      ?? decodeTimestampField(event.fields["endTime"]);
     if (value !== null && (latest === null || value > latest)) {
       latest = value;
     }
   }
   // Fallback: use the max data-section Long timestamp when per-event
-  // extraction fails. This bypasses the unreliable FieldValue pointer
-  // logic and reads timestamps directly from the GWT wire format.
-  if (latest === null && parsed.latestDataTimestamp != null) {
+  // extraction fails. Only when real FieldValue data exists — when
+  // isFilterExpressionOnly is true, data-section Longs are channel
+  // config timestamps (e.g. lastUpdateTime), NOT event timestamps.
+  if (latest === null && parsed.latestDataTimestamp != null && !parsed.isFilterExpressionOnly) {
     latest = parsed.latestDataTimestamp;
   }
   return latest;
